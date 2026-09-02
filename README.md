@@ -1,5 +1,5 @@
-# nether2rak does two distinct jobs in one process:
-
+# nether2rak
+This is what it does:
 1. **FriendConnect** — broadcasts a locally running RakNet dedicated server over Xbox Live as
    a joinable Friends-tab world (the Xbox Live session/MPSD/Friends-tab-visibility side).
 2. **Relay** — actually moves a joining player's traffic into that backend server and back,
