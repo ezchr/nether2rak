@@ -1,11 +1,11 @@
 # nether2rak
-Broadcast your minecraft server as a joinable world on players worlds list.
+Broadcast your minecraft server as a joinable world on players worlds list, allowing anyone to discover your server if they have a friend playing it.
 
 This is what it does:
 1. **FriendConnect** — broadcasts a locally running RakNet dedicated server over Xbox Live as
    a joinable Friends-tab world (the Xbox Live session/MPSD/Friends-tab-visibility side).
 2. **Relay** — actually moves a joining player's traffic into that backend server and back,
-   **without** the fake-handshake-then-`TransferPacket` trick that other friendconnects use. Real
+   **without** the fake-handshake-then-`TransferPacket` trick that other friendconnects use, which makes it impossible for friends of friends to see the world. Real
    players connect over NetherNet and stay connected — the same NetherNet connection *is*
    their game session, relayed straight into the backend server over RakNet.
 
