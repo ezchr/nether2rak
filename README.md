@@ -15,8 +15,7 @@ other end, so any RakNet-speaking Bedrock dedicated server works the same way as
 
 ## Setup
 
-You need three things running/set up, in this order: your backend server, this program built,
-and a config file pointed at that server.
+All you need is nether2rak and your backend server
 
 **1. Get a Bedrock-speaking backend server running first.** This is whatever players will
 actually be playing on — Geyser (bridging a Java server) or a native Bedrock Dedicated Server.
