@@ -7,9 +7,8 @@ This is what it does:
    players connect over NetherNet and stay connected — the same NetherNet connection *is*
    their game session, relayed straight into the backend server over RakNet.
 
-The original intent behind this project was specifically Geyser (a Java-server backend
-speaking Bedrock protocol via translation), and most of the setup/troubleshooting notes below
-are written from that angle — but the relay itself only speaks RakNet to whatever's on the
+The original purpose of this relay is to be used for Geyser servers, and most of the setup/troubleshooting notes below
+are written from that angle — the relay itself speaks RakNet to whatever's on the
 other end, so any RakNet-speaking Bedrock dedicated server (native BDS included, not just
 Geyser) works the same way as far as this code is concerned.
 
