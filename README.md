@@ -1,6 +1,4 @@
-# nether2rak
-
-A from-scratch attempt at "Nether2Rak". It does two distinct jobs in one process:
+# nether2rak does two distinct jobs in one process:
 
 1. **FriendConnect** — broadcasts a locally running RakNet dedicated server over Xbox Live as
    a joinable Friends-tab world (the Xbox Live session/MPSD/Friends-tab-visibility side).
