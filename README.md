@@ -67,17 +67,15 @@ see Credit below.
 
 Built on real, unmodified logic from two MIT-licensed projects:
 - `github.com/GameParrot/netherconnect` — NetherNet signaling/listener code and the core
-  bidirectional Bedrock packet relay (`proxy/proxy_conn.go`), lightly extended here (see the
-  `ForwardLogin`/`RawLoginPacket` additions) to relay third parties instead of only the
-  operator's own account. `LICENSE-netherconnect` preserved as required.
+  bidirectional Bedrock packet relay (`proxy/proxy_conn.go`), used here to relay third parties instead of only the
+  operator's own account.
 - The MPSD session/RTA/friend-request logic in `xbl/` was ported from the decompiled
   `MCXboxBroadcastStandalone.jar` (rtm516/MCXboxBroadcast, MIT)
 
 Also built directly on top of these MIT-licensed Go libraries, pulled in normally via
-`go.mod` (not copied in, so no separate license file needed here — each is licensed under its
-own repo):
+`go.mod`
 - `github.com/df-mc/go-nethernet` (Dragonfly Tech) — NetherNet/WebRTC signaling and transport.
-  Vendored locally at `vendor-go-nethernet/` (its own `LICENSE` travels with it) with one
+  Vendored locally at `vendor-go-nethernet/` with one
   patch: `strings.ToUpper()` on the SDP fingerprint digest in `generateFingerprints()`, fixing
   an identity-assertion signature mismatch against modern Bedrock clients — see the code
   comment there for details.
