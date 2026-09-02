@@ -1,5 +1,5 @@
 # nether2rak
-Broadcast your minecraft server as a joinable world on players' worlds list.
+Broadcast your minecraft server as a joinable world on players worlds list.
 
 This is what it does:
 1. **FriendConnect** — broadcasts a locally running RakNet dedicated server over Xbox Live as
