@@ -33,8 +33,7 @@ nether2rak doesn't run a world itself; it only relays players into one that's al
    Run it on a terminal, it produces a `nether2rak` (or `nether2rak.exe` on Windows) binary in the current folder.
    If it still can't fetch something over the network, try `GOPROXY=direct go build .`.
 
-**3. Edit `config.json`** (already included in this repo, no need to create it) to describe
-   your setup from step 1:
+**3. Edit `config.json`** to match your backend config:
    - `server_address` → the address/port your backend is listening on.
    - `protocol` / `version` → must exactly match your backend's Bedrock protocol number and
      version string, or Bedrock clients get an "outdated" error and can't join.
