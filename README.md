@@ -54,8 +54,7 @@ nether2rak doesn't run a world itself; it only relays players into one that's al
    signed in, it stays running and the world becomes visible on that account's Friends tab.
    (The account runs a risk of getting banned, so use an alt)
 
-Deeper implementation notes — known rough edges most likely to need real-world debugging, the
-full reasoning behind requiring the backend's login validation to be off, and troubleshooting
+Deeper implementation notes — known rough edges most likely to need real-world debugging, and troubleshooting
 for specific errors — are split out into [NOTES.md](NOTES.md).
 
 ## License
