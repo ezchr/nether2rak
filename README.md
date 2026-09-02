@@ -1,4 +1,6 @@
 # nether2rak
+Broadcast your minecraft server as a joinable world on friend list.
+
 This is what it does:
 1. **FriendConnect** — broadcasts a locally running RakNet dedicated server over Xbox Live as
    a joinable Friends-tab world (the Xbox Live session/MPSD/Friends-tab-visibility side).
@@ -9,8 +11,7 @@ This is what it does:
 
 The original purpose of this relay is to be used for Geyser servers, and most of the setup/troubleshooting notes below
 are written from that angle — the relay itself speaks RakNet to whatever's on the
-other end, so any RakNet-speaking Bedrock dedicated server (native BDS included, not just
-Geyser) works the same way as far as this code is concerned.
+other end, so any RakNet-speaking Bedrock dedicated server works the same way as far as this code is concerned. (I don't recommend using nether2rak for native BDS though, it has some technical issues there)
 
 ## Setup
 
@@ -74,8 +75,7 @@ Built on real, unmodified logic from two MIT-licensed projects:
   `ForwardLogin`/`RawLoginPacket` additions) to relay third parties instead of only the
   operator's own account. `LICENSE-netherconnect` preserved as required.
 - The MPSD session/RTA/friend-request logic in `xbl/` was ported from the decompiled
-  `MCXboxBroadcastStandalone.jar` (rtm516/MCXboxBroadcast, MIT) — same JSON field names, same
-  endpoints, rewritten in Go.
+  `MCXboxBroadcastStandalone.jar` (rtm516/MCXboxBroadcast, MIT)
 
 Also built directly on top of these MIT-licensed Go libraries, pulled in normally via
 `go.mod` (not copied in, so no separate license file needed here — each is licensed under its
