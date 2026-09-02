@@ -49,12 +49,7 @@ nether2rak doesn't run a world itself; it only relays players into one that's al
 
    (Leave `config.go` alone - it is a fallback config)
 
-**4. Run the binary** (`./nether2rak` on Linux/Mac, `nether2rak.exe` on Windows) from a
-   terminal, rather than double-clicking it. It's not strictly required — double-clicking it
-   still opens a console window on Windows — but if it ever exits or crashes, that window
-   closes immediately with it, so you'd lose whatever it just printed (including the sign-in
-   code below, or an error). Running it from a terminal you already have open keeps that
-   output visible and scrollable no matter what happens.
+**4. Run the binary** (`./nether2rak` on Linux/Mac, `nether2rak.exe` on Windows) or just double click the executable.
 
    The first time you run it, it prints a Microsoft device-code sign-in link and code
    (`microsoft.com/link`, code `XXXXXXXX`) — open that link in a browser, enter the code, and
