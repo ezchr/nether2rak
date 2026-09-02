@@ -1,4 +1,4 @@
-# nether2rak (DIY)
+# nether2rak
 
 A from-scratch attempt at "Nether2Rak". It does two distinct jobs in one process:
 
@@ -14,23 +14,6 @@ speaking Bedrock protocol via translation), and most of the setup/troubleshootin
 are written from that angle — but the relay itself only speaks RakNet to whatever's on the
 other end, so any RakNet-speaking Bedrock dedicated server (native BDS included, not just
 Geyser) works the same way as far as this code is concerned.
-
-## What it actually does
-
-1. Signs in with a Microsoft account (device-code flow, prints a `microsoft.com/link` code
-   like MCXboxBroadcast does).
-2. Opens an RTA (Real-Time Activity) websocket subscription — required before Xbox Live will
-   accept a session with a member referencing your connection.
-3. Opens a NetherNet (WebRTC) listener via Xbox's modern JsonRPC signaling channel.
-4. Creates an Xbox Live multiplayer session (MPSD, `MinecraftLobby` template) with
-   `joinRestriction`/`readRestriction` set to `"followed"` and binds an **activity handle** to
-   it — both are required for it to actually show up in the Friends tab, not just exist.
-5. When a real player joins via NetherNet: validates they're genuinely Xbox Live
-   authenticated, then dials your local RakNet server over RakNet and **forwards the
-   player's own originally-signed login** — it does not re-authenticate as your own bot
-   account. From then on it's a raw bidirectional packet relay. No transfer, one connection.
-6. Reacts to RTA events in real time: session-membership changes trigger a nonce refresh (so
-   joins don't fail), incoming friend requests get queued and accepted automatically.
 
 ## Setup
 
