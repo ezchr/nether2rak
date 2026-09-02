@@ -50,8 +50,9 @@ nether2rak doesn't run a world itself; it only relays players into one that's al
 
    The first time you run it, it prints a Microsoft device-code sign-in link and code
    (`microsoft.com/link`, code `XXXXXXXX`) — open that link in a browser, enter the code, and
-   sign in with whichever Microsoft account you want the world to appear to be hosted by. Once
+   sign in with whichever Microsoft account you want the world to be broadcasted by. Once
    signed in, it stays running and the world becomes visible on that account's Friends tab.
+   (The account runs a risk of getting banned, so use an alt)
 
 Deeper implementation notes — known rough edges most likely to need real-world debugging, the
 full reasoning behind requiring the backend's login validation to be off, and troubleshooting
