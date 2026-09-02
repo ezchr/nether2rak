@@ -1,0 +1,14 @@
+{
+  "server_address": "127.0.0.1:19132",
+  "host_name": "MyServer",
+  "world_name": "My Server World",
+  "max_players": 20,
+  "protocol": 2169,
+  "version": "1.26.45",
+  "update_interval_seconds": 30,
+  "allowed_xuids": null,
+  "compression": "snappy",
+  "compression_threshold": 256,
+  "fake_player_count": 0,
+  "_fake_player_count_note": "0 = show the real, live connected player count. Above 0 = always show that fixed number instead."
+}
