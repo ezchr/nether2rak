@@ -5,9 +5,8 @@ This is what it does:
 1. **FriendConnect** — broadcasts a locally running RakNet dedicated server over Xbox Live as
    a joinable Friends-tab world (the Xbox Live session/MPSD/Friends-tab-visibility side).
 2. **Relay** — actually moves a joining player's traffic into that backend server and back,
-   **without** the fake-handshake-then-`TransferPacket` trick that other friendconnects use that makes it impossible for friends of friends to see the world. Real
-   players connect over NetherNet and stay connected — the same NetherNet connection *is*
-   their game session, relayed straight into the backend server over RakNet.
+   **without** the fake-handshake-then-`TransferPacket` trick that other friendconnects use.
+   The TransferPacket function in the other FriendConnects makes it impossible for friends of friends to see the world, which is why I made nether2rak, to solve that. 
 
 The original purpose of this relay is to be used for Geyser servers, and most of the setup/troubleshooting notes below
 are written from that angle — the relay itself speaks RakNet to whatever's on the
