@@ -47,11 +47,19 @@ nether2rak doesn't run a world itself; it only relays players into one that's al
      `"nethernet"` to reach a backend that speaks NetherNet directly instead (a Dragonfly
      server, for example) - confirmed working end-to-end. When set to `"nethernet"`,
      `nethernet_backend_address` needs to point at the backend's NetherNet signaling endpoint.
-   - `direct_ip_enabled` / `direct_ip_listen_address` → optionally let players join by typing
-     this machine's address directly, in addition to the Friends tab.
+   - `direct_ip_enabled` / `direct_ip_listen_address` → puts a second relay listener on this
+     machine's address, so a player who types it in directly gets routed through the same
+     identity-forwarding path as a Friends-tab join instead of reaching the backend natively.
+     This only matters together with `fix_native_bds_persistence` below - if your backend
+     already resolves identity from the real login chain (Geyser, Dragonfly, PNX), a direct
+     connection to the backend itself behaves the same with or without this, so there's no
+     reason to enable it.
    - `fix_native_bds_persistence` → only turn this on when the backend is a native Bedrock
-     Dedicated Server. Works around a BDS bug where a reconnecting player gets a fresh, empty
-     save unless their `SelfSignedID` is derived deterministically from their real XUID.
+     Dedicated Server, together with `direct_ip_enabled` above. BDS resolves player identity
+     differently depending on whether a login arrives relayed or direct, so without this a
+     player gets two separate saves depending on which door they used to join. This makes both
+     doors derive the same `SelfSignedID` from the player's real XUID, so they always resolve
+     to the same save.
 
    (Leave `config.go` alone - it is a fallback config)
 
