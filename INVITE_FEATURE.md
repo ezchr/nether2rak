@@ -10,16 +10,23 @@ at, as a real, live Xbox Live-authenticated client, and record every real player
 server's player list, for as long as it stays connected.
 
 ```
-cd /root/mcjava/n2r-unified/run/scraper-ezchr
+cd cmd/scraper
+go build .
 ./scraper play.cubecraft.net:19132
 ```
+
+Run it from its own directory, separate from the relay's own working directory - it needs its
+own `token.json` and writes its own `invite_queue.txt` there.
 
 - Requires its own `token.json` in the run directory (Microsoft device-code sign-in on first run,
   or copy an existing cached token file in). **Must be a different account from whichever one is
   hosting a nether2rak world** - see "why two accounts" below.
 - Writes discovered players to `invite_queue.txt` in its own working directory, one line per
-  player: `xuid,username` (e.g. `2535440792904888,EzCrazy4395`). The username is there purely so
-  a human can read the file - only the xuid half is ever used programmatically.
+  player: `xuid,username,discoveredUnixSeconds` (e.g.
+  `2535440792904888,EzCrazy4395,1758099600`). The username is there purely so a human can read
+  the file - only the xuid half is ever used programmatically. Entries older than 30 days are
+  pruned automatically (on startup, and once a day while the scraper is running) so the file
+  doesn't grow forever with people who have no realistic chance of still caring about an invite.
 - Runs until interrupted (Ctrl+C) or the connection drops, in which case it reconnects
   automatically after 10 seconds and keeps going. It is **not** a one-time snapshot: a player who
   joins the target server an hour after the scraper started still gets recorded, and a restart of
@@ -42,10 +49,9 @@ hosting a public world *and* constantly joining strangers' servers to scrape the
 if either behavior ever causes a problem (a ban, a flag, a crash), it would take the other down
 with it.
 
-So: the scraper runs under its own dedicated account (tonight, `ezchr` - `token.json.previous-account`
-copied into its own run directory), the relay's invite-sending stays on whichever account is
-actually hosting the world, and the only thing connecting them is the shared `invite_queue.txt`
-file.
+So: the scraper runs under its own dedicated account (its own `token.json`, separate from the
+relay's), the relay's invite-sending stays on whichever account is actually hosting the world,
+and the only thing connecting them is the shared `invite_queue.txt` file.
 
 ## The relay side (`invitewatcher.go`, bundled into `nether2rak-unified`)
 
@@ -120,10 +126,7 @@ Scope note: this only sees players who came in through the relay itself. A playe
 backend directly, bypassing the relay entirely, is invisible to it - which is the correct scope
 here, since the whole point of these invite features is getting people INTO the relay.
 
-## Changes made to nether2rak itself tonight
-
-All in `/root/mcjava/n2r-unified/nether2rak/`, the one shared source tree/binary used by every
-`run/<target>` config.
+## Implementation notes
 
 ### New files
 
@@ -167,5 +170,5 @@ All in `/root/mcjava/n2r-unified/nether2rak/`, the one shared source tree/binary
 ### Nothing else in the relay's existing behavior changed
 
 The client-facing NetherNet listener, the backend dial logic (RakNet or NetherNet), identity
-forwarding, the direct-IP door, and the native-BDS persistence fix are all untouched by tonight's
+forwarding, the direct-IP door, and the native-BDS persistence fix are all untouched by the
 invite work - this was purely additive on top of the already-working relay.
