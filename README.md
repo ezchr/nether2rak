@@ -2,15 +2,23 @@
 Broadcast your minecraft server as a joinable world on players worlds list, allowing anyone to discover your server if they have a friend playing it.
 
 This is what it does:
-1. **FriendConnect** — broadcasts a locally running RakNet dedicated server over Xbox Live as
-   a joinable Friends-tab world (the Xbox Live session/MPSD/Friends-tab-visibility side).
+1. **FriendConnect** — broadcasts a locally running Bedrock dedicated server (RakNet or
+   NetherNet) over Xbox Live as a joinable Friends-tab world (the Xbox Live
+   session/MPSD/Friends-tab-visibility side).
 2. **Relay** — actually moves a joining player's traffic into that backend server and back,
    **without** the fake-handshake-then-`TransferPacket` trick that other friendconnects use.
    The `TransferPacket` function in the other FriendConnects makes it impossible for friends of friends to see the world, which is why I made nether2rak... to solve that. 
 
 The original purpose of this relay is to be used for Geyser servers, and most of the setup/troubleshooting notes below
-are written from that angle — the relay itself speaks RakNet to whatever's on the
-other end, so any RakNet-speaking Bedrock dedicated server works the same way as far as this code is concerned. (I don't recommend using nether2rak for native BDS though, it has some technical issues there)
+are written from that angle — the relay speaks both RakNet and NetherNet to whatever's on the
+other end, so any RakNet- or NetherNet-speaking Bedrock dedicated server works the same way as
+far as this code is concerned (a Dragonfly server, for example, speaks NetherNet directly) — see
+`backend_transport` in Setup below.
+
+Native BDS now works reliably as a backend too. One thing to know going in: native BDS doesn't
+log the real XUID for a relayed, self-signed login, so you can't grant operator/permissions by
+XUID directly from BDS itself — you'll need an Endstone or LeviLamina plugin on the BDS side to
+resolve and assign permissions from the player's actual identity.
 
 ## Setup
 
