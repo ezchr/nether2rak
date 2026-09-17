@@ -185,6 +185,21 @@ func (s *Session) LegacyMultiplayerXBL(ctx context.Context) (tok *auth.XBLToken,
 	return s.RequestXBLToken(ctx, "https://multiplayer.minecraft.net/")
 }
 
+// AuthorizationServiceURI returns the base URI of the Minecraft authorization service that issued
+// this session's multiplayer tokens, or "" if the session has not resolved one.
+//
+// NetherNet identity assertions have to name their token's issuer in the 'idp.domain' field of the
+// SDP 'a=identity' attribute (for a client identity that is this service, e.g.
+// "https://authorization.franchise.minecraft-services.net"; a server identity uses "self"). The
+// value is read from service discovery rather than hardcoded so it follows whichever environment
+// this session actually authenticated against.
+func (s *Session) AuthorizationServiceURI() string {
+	if s.env.ServiceURI == nil {
+		return ""
+	}
+	return s.env.ServiceURI.String()
+}
+
 // MultiplayerToken requests a multiplayer token from Microsoft. The token can be reused, but is not
 // reused by the vanilla client.
 func (s *Session) MultiplayerToken(ctx context.Context, key *ecdsa.PublicKey) (jwt string, err error) {
@@ -217,7 +232,7 @@ type mcTokenSource struct {
 	mcToken *service.Token
 }
 
-func (m *mcTokenSource) Token() (*service.Token, error) {
+func (m *mcTokenSource) ServiceToken(context.Context) (*service.Token, error) {
 	return m.mcToken, nil
 }
 

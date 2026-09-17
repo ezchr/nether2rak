@@ -49,6 +49,10 @@ type ProxyConn struct {
 
 	loginDone bool
 
+	// encryptionEnabled records whether a ServerToClientHandshake was received and Minecraft-level
+	// encryption was turned on for this connection. See EncryptionEnabled.
+	encryptionEnabled bool
+
 	hdr *packet.Header
 
 	pool packet.Pool
@@ -67,6 +71,18 @@ type ProxyConn struct {
 	// nethernet (server) side connection, so a caller bridging to a downstream server can
 	// forward the real client's originally-signed identity chain unmodified. See RawLoginPacket.
 	rawLoginPacket []byte
+}
+
+// EncryptionEnabled reports whether Minecraft-level encryption was negotiated on this connection
+// (i.e. the remote end sent a ServerToClientHandshake).
+//
+// It is false for a NetherNet connection that skips the handshake because DTLS already provides
+// transport encryption. On a backend connection this is the deciding fact for whether the relay
+// could forward a player's original signed identity chain rather than re-signing it: completing
+// the handshake requires the private key matching the chain, which the relay only has when it
+// generated the chain itself.
+func (c *ProxyConn) EncryptionEnabled() bool {
+	return c.encryptionEnabled
 }
 
 // RawLoginPacket returns the raw wire bytes of the Login packet received during ReadLoop, if
@@ -117,7 +133,7 @@ func (c *ProxyConn) ReadLoop() error {
 			c.conn.Close()
 			return err
 		}
-		for _, pkBytes := range pks {
+		for i, pkBytes := range pks {
 			packetData, err := ParseData(pkBytes)
 			if err != nil {
 				c.conn.Close()
@@ -131,9 +147,20 @@ func (c *ProxyConn) ReadLoop() error {
 				}
 				switch pk := pk.(type) {
 				case *packet.RequestNetworkSettings:
-					c.handleRequestNetworkSettings()
+					// An error here means the NetworkSettings reply failed to send, so
+					// compression is never enabled and every later packet on this connection
+					// is garbled - close rather than continue with nothing logged anywhere.
+					if err := c.handleRequestNetworkSettings(); err != nil {
+						c.conn.Close()
+						return err
+					}
 				case *packet.NetworkSettings:
-					c.handleNetworkSettings(pk)
+					// Likewise: an unknown compression algorithm here leaves the decoder
+					// unconfigured instead of failing outright.
+					if err := c.handleNetworkSettings(pk); err != nil {
+						c.conn.Close()
+						return err
+					}
 				case *packet.Login:
 					if err := c.handleLogin(pk); err != nil {
 						return err
@@ -147,6 +174,7 @@ func (c *ProxyConn) ReadLoop() error {
 						// pick up via RawLoginPacket().
 						c.rawLoginPacket = pkBytes
 						c.loginDone = true
+						c.deferRemaining(pks[i+1:])
 						return nil
 					}
 				case *packet.ServerToClientHandshake:
@@ -154,12 +182,14 @@ func (c *ProxyConn) ReadLoop() error {
 						return err
 					}
 					c.loginDone = true
+					c.deferRemaining(pks[i+1:])
 					return nil
 				case *packet.ClientToServerHandshake:
 					if err := c.handleClientToServerHandshake(); err != nil {
 						return err
 					}
 					c.loginDone = true
+					c.deferRemaining(pks[i+1:])
 					return nil
 				case *packet.Disconnect:
 					return errors.New(pk.Message)
@@ -168,6 +198,7 @@ func (c *ProxyConn) ReadLoop() error {
 					case packet.PlayStatusLoginSuccess, packet.PlayStatusPlayerSpawn:
 						c.deferredPackets = append(c.deferredPackets, pkBytes)
 						c.loginDone = true
+						c.deferRemaining(pks[i+1:])
 						return nil
 					case packet.PlayStatusLoginFailedClient:
 						return ErrOutdatedClient
@@ -184,6 +215,23 @@ func (c *ProxyConn) ReadLoop() error {
 	}
 }
 
+// deferRemaining queues packets that arrived in the same batch as the one that
+// completed the login sequence, so they are replayed to the caller once the
+// relay starts pumping instead of being lost.
+//
+// ReadLoop returns as soon as it sees the packet that ends login, but a batch
+// can hold more packets behind it. gophertunnel writes PlayStatus(LoginSuccess)
+// and ResourcePacksInfo back to back without flushing in between, so a fast
+// backend delivers both in a single batch; returning without queueing the
+// remainder dropped ResourcePacksInfo outright and left the player stuck on
+// "loading resource packs" forever, with nothing logged on either side.
+func (c *ProxyConn) deferRemaining(rest [][]byte) {
+	if len(rest) == 0 {
+		return
+	}
+	c.deferredPackets = append(c.deferredPackets, rest...)
+}
+
 func (c *ProxyConn) ClientData() login.ClientData {
 	return c.clientData
 }
@@ -195,10 +243,14 @@ func (c *ProxyConn) Protocol() int32 {
 func decodePacket(pk packet.Packet, b *bytes.Buffer) (err error) {
 	defer func() {
 		if rErr := recover(); rErr != nil {
+			// The recovered error used to be assigned here and then unconditionally
+			// overwritten by a generic message right below, so the real cause of every
+			// malformed-packet panic was thrown away before it ever reached a log line.
 			if errr, ok := rErr.(error); ok {
 				err = errr
+			} else {
+				err = fmt.Errorf("decode packet: %v", rErr)
 			}
-			err = errors.New("unexpected error")
 		}
 	}()
 	r := protocol.NewReader(b, 0, true)
@@ -347,6 +399,7 @@ type saltClaims struct {
 // on the client side of the connection, using the hash and the public key from the server exposed in the
 // packet.
 func (conn *ProxyConn) handleServerToClientHandshake(pk *packet.ServerToClientHandshake) error {
+	conn.encryptionEnabled = true
 	tok, err := jwt.ParseSigned(string(pk.JWT), []jose.SignatureAlgorithm{jose.ES384})
 	if err != nil {
 		return fmt.Errorf("parse server token: %w", err)

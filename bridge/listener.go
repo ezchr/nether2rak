@@ -10,10 +10,10 @@ import (
 	"time"
 
 	"github.com/df-mc/go-nethernet"
-	"github.com/pion/webrtc/v4"
 	"github.com/gameparrot/netherconnect/messaging"
 	"github.com/gameparrot/netherconnect/session"
 	"github.com/gameparrot/netherconnect/signaling"
+	"github.com/pion/webrtc/v4"
 )
 
 // Listener wraps one or both NetherNet signaling transports.
@@ -62,16 +62,21 @@ func Listen(ctx context.Context, authSession *session.Session, netherNetID uint6
 	// (2026-08-14) failed with "start ICE: context deadline exceeded" at exactly the 5-second
 	// mark. 30 seconds matches what most WebRTC stacks use as an ICE connect timeout.
 	connCtx := func(parent context.Context, _ *nethernet.Conn) context.Context {
-		ctx, _ := context.WithTimeout(parent, 30*time.Second)
+		ctx, cancel := context.WithTimeout(parent, 30*time.Second)
+		// go-nethernet gives no completion callback for a Conn's lifetime, so release the
+		// timer when ctx itself ends (success, timeout, or parent cancellation alike) rather
+		// than discarding cancel - go vet: lostcancel flagged a live 30s timer per accepted
+		// connection that was never being released otherwise.
+		context.AfterFunc(ctx, cancel)
 		return ctx
 	}
 
 	// Bedrock's own ICE implementation uses 4-character ufrags - real client offers
-	// carry "a=ice-ufrag:na6b", and a known-working server observed a matching
-	// 4-character remote ufrag in its STUN USERNAME ("rdLY:RzAv"). pion defaults to
-	// 16 characters, which is legal per RFC 5245 but may exceed what the Bedrock
-	// client's STUN parser accepts, causing it to silently drop our connectivity
-	// checks instead of reporting an error.
+	// carry "a=ice-ufrag:na6b" - and netherboat's working server does the same (its
+	// STUN USERNAME was observed as "rdLY:RzAv", i.e. a 4-character remote ufrag).
+	// pion defaults to 16 characters, which is legal per RFC 5245 but may exceed
+	// what the Bedrock client's STUN parser accepts, causing it to silently drop
+	// our connectivity checks instead of reporting an error.
 	settings := webrtc.SettingEngine{}
 	settings.SetICECredentials(randomICEString(4), randomICEString(24))
 	api := webrtc.NewAPI(webrtc.WithSettingEngine(settings))
@@ -190,7 +195,6 @@ func (l *Listener) Serve(ctx, connCtx context.Context, cfg Config) error {
 	// until ctx is cancelled.
 	return <-errCh
 }
-
 
 // randomICEString returns a random ICE ufrag/password of n characters, using only
 // characters permitted in the SDP ice-ufrag/ice-pwd attributes.

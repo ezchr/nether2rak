@@ -288,15 +288,18 @@ func (c tokenClaims) Validate(e jwt.Expected) error {
 // generateFingerprints generates the canonical JSON payload covering DTLS fingerprints.
 // The resulting bytes can be used as the payload for [jose.ParseDetached].
 //
-// The digest is upper-cased before being embedded. RFC 4572 SS5 mandates uppercase hex for
-// the SDP fingerprint attribute, and pion/webrtc's DTLSFingerprint.Value is lowercase - a
-// verifier that reconstructs this canonical payload strictly per spec (uppercase) would
-// silently fail to match our lowercase digest, invalidating the JWS signature while every
-// other part of the exchange looks completely normal. This exact bug class (a casing
-// mismatch in this canonicalization step) is what the original Nether2Rak developer
-// described losing a night to fixing with strings.ToUpper() - confirmed 2026-08-14 after
-// live testing showed signaling/ICE/TURN all completing successfully but the Bedrock client
-// never attempting genuine connectivity checks toward us.
+// Matches upstream v1.0.20 exactly: the digest is embedded as-is (pion/webrtc's
+// DTLSFingerprint.Value, lowercase hex), with no case conversion.
+//
+// A previous version of this function upper-cased the digest, based on an unverified 2026-08-14
+// comment claiming a casing mismatch broke every WebRTC identity assertion (RFC 4572 SS5 wants
+// uppercase hex in the SDP fingerprint attribute; the claim was that a spec-strict verifier would
+// reconstruct this payload as uppercase and fail to match). That claim was never actually tested
+// against a real verifier, was never present in ANY upstream go-nethernet commit or release, and
+// on re-verification 2026-09-16 makes no observable difference: an isolated build with ToUpper
+// removed connected successfully to a live Geyser (CloudburstMC/Network) NetherNet backend,
+// completing the full identity-verification handshake ("trusting server identity") identically to
+// the version with the fix present. See nether2rak-gonethernet-pin memory note.
 func generateFingerprints(fingerprints []webrtc.DTLSFingerprint) []byte {
 	b := &bytes.Buffer{}
 	b.WriteString(`{"fingerprint":[`)
@@ -307,7 +310,7 @@ func generateFingerprints(fingerprints []webrtc.DTLSFingerprint) []byte {
 		b.WriteString(`{"algorithm":`)
 		b.WriteString(strconv.Quote(fingerprint.Algorithm))
 		b.WriteString(`,"digest":`)
-		b.WriteString(strconv.Quote(strings.ToUpper(fingerprint.Value)))
+		b.WriteString(strconv.Quote(fingerprint.Value))
 		b.WriteByte('}')
 	}
 	b.WriteString(`]}`)

@@ -768,7 +768,7 @@ func (desc description) encode() ([]byte, error) {
 	media.WithICECredentials(desc.ice.UsernameFragment, desc.ice.Password)
 	media.WithValueAttribute(sdp.AttrKeyICEOptions, "trickle") // ice-options:trickle is always present even if the connection is non-trickle
 	for _, fingerprint := range desc.dtls.Fingerprints {
-		media.WithFingerprint(fingerprint.Algorithm, strings.ToUpper(fingerprint.Value))
+		media.WithFingerprint(fingerprint.Algorithm, fingerprint.Value)
 	}
 	media.WithValueAttribute(sdp.AttrKeyConnectionSetup, desc.connectionRole(desc.dtls.Role).String())
 	media.WithValueAttribute(sdp.AttrKeyMID, "0")

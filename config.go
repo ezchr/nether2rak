@@ -6,23 +6,39 @@ import (
 )
 
 type FileConfig struct {
-	// ServerAddress is host:port of the backend RakNet listener (Geyser, native BDS, or any
-	// other RakNet-speaking server). It MUST have encryption disabled for this bridge to
-	// work - see proxy/dial.go's ForwardLogin comment.
-	ServerAddress string `json:"server_address"`
+	// BackendTransport selects how the relay reaches the backend server:
+	//
+	//	"raknet"    - (default) a RakNet server such as Geyser, dialed at GeyserAddress.
+	//	"nethernet" - a Bedrock Dedicated Server started with transport=nethernet, reached at
+	//	              NetherNetBackendAddress over WebRTC. The relay is then NetherNet on both
+	//	              legs and no RakNet is involved anywhere in the path.
+	//
+	// The client-facing side is always NetherNet regardless; this only changes the backend leg.
+	BackendTransport string `json:"backend_transport"`
+
+	// GeyserAddress is host:port of Geyser's RakNet listener. Geyser's listener MUST have
+	// encryption disabled for this bridge to work - see proxy/dial.go's ForwardLogin comment.
+	// Only used when BackendTransport is "raknet".
+	GeyserAddress string `json:"geyser_address"`
+
+	// NetherNetBackendAddress is the base URL of the backend's NetherNet HTTP signaling
+	// endpoint, e.g. "http://127.0.0.1:19134". Only used when BackendTransport is "nethernet".
+	//
+	// This is the backend's TCP server-port - the same port named by server-port in BDS's
+	// server.properties - because that is where a BDS running transport=nethernet serves the
+	// /v1/join signaling endpoints. It is NOT the UDP LAN-discovery port (7551): BDS does not
+	// announce dedicated servers over LAN discovery, confirmed 2026-09-15 by packet capture.
+	//
+	// A bare "host:port" is accepted and assumed to be plain HTTP.
+	NetherNetBackendAddress string `json:"nethernet_backend_address"`
 
 	// World info shown on the Friends tab / session listing.
-	HostName  string `json:"host_name"`
-	WorldName string `json:"world_name"`
+	HostName   string `json:"host_name"`
+	WorldName  string `json:"world_name"`
+	MaxPlayers int    `json:"max_players"`
 
-	// MaxPlayers is display-only, same as MCXboxBroadcast: it's sent to Xbox Live as part
-	// of the session listing, but nothing here checks it before accepting a connection, so
-	// it does not actually limit how many players can join.
-	MaxPlayers int `json:"max_players"`
-
-	// FakePlayerCount, when above zero, is shown on the Friends tab instead of the real
-	// count. Zero reports the real, live count of players currently connected through this
-	// relay instead (see bridge.ConnectedPlayerCount and displayPlayerCount in main.go).
+	// FakePlayerCount, when above zero, is shown on the Friends tab instead of the
+	// real member count. Zero reports the session's own count honestly.
 	FakePlayerCount int `json:"fake_player_count"`
 
 	// Protocol/Version must match the Bedrock protocol Geyser is actually speaking. Check
@@ -55,6 +71,34 @@ type FileConfig struct {
 	// itself negotiates values in the 256-512 range.
 	CompressionThreshold int `json:"compression_threshold"`
 
+	// FixNativeBDSPersistence works around native BDS discarding a self-signed login's real
+	// XUID, which otherwise gives every reconnect a fresh, empty player-data record. Turn this
+	// on ONLY when the backend is native Bedrock Dedicated Server. Any other backend (Geyser,
+	// Dragonfly, PNX...) resolves player identity from the login chain's real XUID on its own
+	// and does not need or want this - see bridge.Config.FixNativeBDSPersistence.
+	FixNativeBDSPersistence bool `json:"fix_native_bds_persistence"`
+
+	// DirectIPEnabled turns on the second front door: players joining by typing this
+	// machine's address into their Bedrock server list, rather than through the Friends tab.
+	//
+	// Both doors relay through the same code path, so a player gets the same backend player
+	// record either way (see proxy/self_signed_id.go). With this off, a direct IP join would
+	// have to reach the backend server directly and would resolve to a different record.
+	DirectIPEnabled bool `json:"direct_ip_enabled"`
+
+	// DirectIPListenAddress is the host:port the direct-IP front door listens on, e.g.
+	// ":19132" - the address players type. It is TCP: a Bedrock client probes
+	// GET /v1/join there before it will consider a RakNet connection.
+	//
+	// It must not collide with the backend's own port.
+	DirectIPListenAddress string `json:"direct_ip_listen_address"`
+
+	// InvitePort is the loopback port the invite-everyone-from-another-server control endpoint
+	// listens on (see invitewatcher.go). The feature itself is OFF BY DEFAULT regardless of this
+	// port being open - it only starts sending anything after a "start" is issued to it. Same
+	// multi-instance caveat as PingPort: give each concurrently-run instance its own port.
+	InvitePort int `json:"invite_port"`
+
 	// PingPort is the loopback port the real-latency ping API (for the Folia-side
 	// PingDisplay plugin) listens on. Only needs to change from the default if running
 	// more than one nether2rak instance on the same machine (e.g. two accounts
@@ -69,43 +113,37 @@ type FileConfig struct {
 
 func defaultConfig() FileConfig {
 	return FileConfig{
-		ServerAddress: "127.0.0.1:19132",
-		HostName:      "Nether2Rak",
-		WorldName:     "Nether2Rak",
-		MaxPlayers:    20,
+		// Defaults preserve the original behaviour exactly: RakNet into Geyser. The NetherNet
+		// backend is strictly opt-in via backend_transport.
+		BackendTransport:        "raknet",
+		GeyserAddress:           "127.0.0.1:19132",
+		NetherNetBackendAddress: "http://127.0.0.1:19134",
+		HostName:                "Nether2Rak",
+		WorldName:               "Nether2Rak",
+		MaxPlayers:              20,
 		// These matched the MCXboxBroadcastStandalone.jar you uploaded (Bedrock_v2168, build
 		// 149) at the time this was written. Bedrock's protocol number changes with nearly
 		// every release - CHECK Geyser's own startup log for "protocol X" and keep this in
 		// sync, or joins will fail with an outdated-client/server disconnect.
-		Protocol:              2168,
-		Version:               "1.26.44",
-		UpdateIntervalSeconds: 30,
-		Compression:           "snappy",
-		CompressionThreshold:  256,
-		PingPort:              7777,
-		PprofPort:             6060,
+		Protocol:                2168,
+		Version:                 "1.26.44",
+		UpdateIntervalSeconds:   30,
+		Compression:             "snappy",
+		CompressionThreshold:    256,
+		FixNativeBDSPersistence: false,
+		DirectIPEnabled:         false,
+		DirectIPListenAddress:   ":19132",
+		InvitePort:              7782,
+		PingPort:                7777,
+		PprofPort:               6060,
 	}
 }
-
-// fakePlayerCountNote is written alongside fake_player_count whenever this program generates
-// a fresh config.json (see loadConfig), so the 0-vs-fixed-value behavior stays documented in
-// the file itself even if the shipped example config.json is ever deleted and regenerated.
-// It's a plain string key, not a FileConfig field, so json.Unmarshal on read silently ignores
-// it - the same reason the shipped config.json can safely carry this key already.
-const fakePlayerCountNote = "0 = show the real, live connected player count. Above 0 = always show that fixed number instead."
 
 func loadConfig(path string) (FileConfig, error) {
 	b, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
 		cfg := defaultConfig()
 		out, _ := json.MarshalIndent(cfg, "", "  ")
-		var withNote map[string]any
-		if err := json.Unmarshal(out, &withNote); err == nil {
-			withNote["_fake_player_count_note"] = fakePlayerCountNote
-			if noted, err := json.MarshalIndent(withNote, "", "  "); err == nil {
-				out = noted
-			}
-		}
 		_ = os.WriteFile(path, out, 0644)
 		return cfg, nil
 	}

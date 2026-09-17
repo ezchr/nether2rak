@@ -21,6 +21,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/df-mc/go-nethernet"
 	"github.com/gameparrot/netherconnect/bridge"
 	"github.com/gameparrot/netherconnect/proxy"
 	"github.com/gameparrot/netherconnect/session"
@@ -170,7 +171,52 @@ func main() {
 	}
 	log.Info("packet compression configured",
 		"algorithm", cfg.Compression, "threshold", proxy.DefaultCompressionThreshold)
-	log.Info("relaying into backend server", "address", cfg.ServerAddress)
+	// Resolve and sanity-check the backend transport before announcing the world. A bad address
+	// or a backend that isn't actually speaking NetherNet is worth failing/warning about here,
+	// rather than letting it surface as an unexplained stall on the first player's join.
+	switch strings.ToLower(strings.TrimSpace(cfg.BackendTransport)) {
+	case "", bridge.TransportRakNet:
+		log.Info("relaying into backend over raknet", "address", cfg.GeyserAddress)
+	case bridge.TransportNetherNet:
+		normalized, err := bridge.NormalizeNetherNetAddress(cfg.NetherNetBackendAddress)
+		if err != nil {
+			log.Error("invalid nethernet_backend_address in config.json", "err", err)
+			os.Exit(1)
+		}
+		log.Info("relaying into backend over nethernet", "address", normalized)
+		// Warn rather than exit: the backend may simply not be up yet, and the relay is useful
+		// the moment it is. Each join re-dials anyway, so this recovers on its own.
+		probeCtx, cancelProbe := context.WithTimeout(ctx, 10*time.Second)
+		if err := bridge.ProbeNetherNetBackend(probeCtx, normalized, log); err != nil {
+			log.Warn("backend did not answer the nethernet capability probe - joins will fail until it does", "err", err)
+		}
+		cancelProbe()
+	default:
+		log.Error("unknown backend_transport in config.json - use \"raknet\" or \"nethernet\"",
+			"value", cfg.BackendTransport)
+		os.Exit(1)
+	}
+	// Second front door: direct-IP joins. Started once for the process (not per Xbox Live
+	// session) because it has no dependency on Xbox Live signaling - it only needs the backend.
+	// It is handed the same bridge.Config the Friends-tab listener gets below, which is what
+	// makes both paths resolve a player to one backend record.
+	if cfg.DirectIPEnabled {
+		if err := bridge.StartDirectIP(ctx, bridge.DirectIPConfig{
+			ListenAddress: cfg.DirectIPListenAddress,
+			WorldName:     cfg.WorldName,
+			MaxPlayers:    cfg.MaxPlayers,
+			Protocol:      cfg.Protocol,
+			Version:       cfg.Version,
+			Relay:         relayConfig(cfg, authSession, allowXUID, log),
+			Log:           log,
+		}); err != nil {
+			log.Error("failed to start direct-ip front door", "err", err)
+			os.Exit(1)
+		}
+	} else {
+		log.Info("direct-ip front door disabled (set direct_ip_enabled to turn it on)")
+	}
+
 	log.Info("running - press Ctrl+C to stop (there is no console prompt; this process just waits for connections)")
 
 	// The signaling websocket's Authorization header is a snapshot of our MC multiplayer token
@@ -286,10 +332,13 @@ func runSession(ctx context.Context, authSession *session.Session, rta *xbl.RTA,
 	// showed MemberCount:1 with zero real players connected. Sending 0 here contradicts the
 	// session's own "members" map (which always has at least one entry) and is a likely reason
 	// the world was filtered from the Friends tab. FakePlayerCount, when set above zero,
-	// overrides this floor for display purposes only. When FakePlayerCount is 0, the displayed
-	// count instead tracks bridge.ConnectedPlayerCount() live (refreshed every session-update
-	// tick below), floored at 1 for the same reason.
-	displayedPlayers := displayPlayerCount(cfg)
+	// overrides this floor for display purposes only - it was already a config field but had
+	// never actually been wired in, so it silently had no effect (config showed 21, Friends tab
+	// showed 1).
+	displayedPlayers := 1
+	if cfg.FakePlayerCount > 0 {
+		displayedPlayers = cfg.FakePlayerCount
+	}
 
 	xblSession := xbl.New(authSession, xuid, sessionID, connectionID, pmsgID, netherNetID, log)
 	sessionID = xblSession.SessionID()
@@ -429,6 +478,16 @@ func runSession(ctx context.Context, authSession *session.Session, rta *xbl.RTA,
 	}
 	log.Info("session is live - should now be visible on the friends tab", "sessionID", xblSession.SessionID())
 
+	// Invite-everyone-from-another-server feature (see invitewatcher.go for the full design and
+	// cmd/scraper for the other half). OFF BY DEFAULT - the controller starts stopped, and only
+	// runs after an explicit "start" over the loopback HTTP control endpoint below. sessionCtx,
+	// not ctx, bounds the loop's max lifetime - a session rebuild must stop it along with
+	// everything else that references the old xblSession, since this XUID list belongs to the
+	// specific session being recreated.
+	inviteCtl := newInviteController(xblSession, log)
+	friendsInviteCtl := newFriendsInviteController(authSession, xblSession, log)
+	startInviteControlServer(sessionCtx, fmt.Sprintf("127.0.0.1:%d", cfg.InvitePort), inviteCtl, friendsInviteCtl, log)
+
 	if debug {
 		time.Sleep(3 * time.Second)
 		checkOwnPresence(sessionCtx, authSession, xuid, log)
@@ -442,21 +501,6 @@ func runSession(ctx context.Context, authSession *session.Session, rta *xbl.RTA,
 			case <-sessionCtx.Done():
 				return
 			case <-ticker.C:
-				// Refresh the advertised player count before pushing the update, so a live
-				// FakePlayerCount:0 deployment reflects real joins/leaves rather than staying
-				// stuck at whatever the count was when the session was first created. Skipped
-				// when FakePlayerCount is set, since that value is a static override and never
-				// changes here.
-				if cfg.FakePlayerCount == 0 {
-					xblSession.SetWorldInfo(xbl.Config{
-						HostName:   cfg.HostName,
-						WorldName:  cfg.WorldName,
-						Players:    displayPlayerCount(cfg),
-						MaxPlayers: cfg.MaxPlayers,
-						Protocol:   cfg.Protocol,
-						Version:    cfg.Version,
-					})
-				}
 				if err := xblSession.Update(sessionCtx); err != nil {
 					log.Error("failed to update session", "err", err)
 				}
@@ -479,11 +523,7 @@ func runSession(ctx context.Context, authSession *session.Session, rta *xbl.RTA,
 	// torn down and rebuilt when sessionCtx ends; a healthy in-progress WebRTC transport for a
 	// connected player has nothing to do with whether the signaling websocket that originally
 	// negotiated it is still open.
-	err = ln.Serve(sessionCtx, ctx, bridge.Config{
-		ServerAddress: cfg.ServerAddress,
-		AllowXUID:     allowXUID,
-		Log:           log,
-	})
+	err = ln.Serve(sessionCtx, ctx, relayConfig(cfg, authSession, allowXUID, log))
 	if errors.Is(context.Cause(sessionCtx), errTokenRenewal) {
 		return sessionID, netherNetID, errTokenRenewal
 	}
@@ -493,18 +533,22 @@ func runSession(ctx context.Context, authSession *session.Session, rta *xbl.RTA,
 	return sessionID, netherNetID, err
 }
 
-// displayPlayerCount computes the player count to advertise on the Friends tab: cfg.FakePlayerCount
-// when set above zero (an explicit override), otherwise the real live count of players currently
-// relayed through this process (bridge.ConnectedPlayerCount), floored at 1 - see the floor's doc
-// comment at this function's call site in runSession for why 0 can't be sent to Xbox Live.
-func displayPlayerCount(cfg FileConfig) int {
-	if cfg.FakePlayerCount > 0 {
-		return cfg.FakePlayerCount
+// relayConfig builds the bridge configuration shared by both front doors. Both the Friends-tab
+// listener and the direct-IP listener are served with the value this returns, deliberately: any
+// difference between them would be a difference in how a player's identity reaches the backend,
+// which is the exact problem this build exists to eliminate.
+func relayConfig(cfg FileConfig, authSession *session.Session, allowXUID func(string) bool, log *slog.Logger) bridge.Config {
+	return bridge.Config{
+		NetherNetIdentity: func(ctx context.Context) (*nethernet.Identity, error) {
+			return bridge.NewClientIdentity(ctx, authSession)
+		},
+		BackendTransport:        cfg.BackendTransport,
+		GeyserAddress:           cfg.GeyserAddress,
+		NetherNetBackendAddress: cfg.NetherNetBackendAddress,
+		FixNativeBDSPersistence: cfg.FixNativeBDSPersistence,
+		AllowXUID:               allowXUID,
+		Log:                     log,
 	}
-	if n := bridge.ConnectedPlayerCount(); n > 0 {
-		return n
-	}
-	return 1
 }
 
 // checkOwnPresence queries userpresence.xboxlive.com directly for this account's own presence
