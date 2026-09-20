@@ -138,11 +138,20 @@ func main() {
 	bridge.StartPingServer(fmt.Sprintf("127.0.0.1:%d", cfg.PingPort), log)
 
 	// --- Friend request handling.
+	//
+	// FriendManager.Run drives this: an immediate scan at startup (catches up on requests
+	// received entirely while this relay was offline), then RTA's push notification as the fast
+	// path, falling back to a periodic scan since that push was found, in real operation, to go
+	// silently quiet indefinitely after some reconnects - see FriendManager.Run's own doc comment
+	// for the real incident that motivated this (three pending requests found sitting unprocessed
+	// with zero related log output).
 	friends := xbl.NewFriendManager(authSession, log)
 	go friends.Run(ctx)
 	rta.OnFriendRequest = func() {
-		if err := friends.CheckPending(ctx); err != nil {
-			log.Error("failed to check pending friend requests", "err", err)
+		select {
+		case friends.Trigger <- struct{}{}:
+		default:
+			// Already a trigger pending; Run will pick it up on its next iteration regardless.
 		}
 	}
 
