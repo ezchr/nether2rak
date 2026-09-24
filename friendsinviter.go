@@ -128,9 +128,11 @@ func (c *friendsInviteController) run(ctx context.Context) {
 // registerFriendsInviteRoutes adds the /invites/friends/* routes to an existing mux - called
 // from startInviteControlServer so both inviters share one HTTP server/port rather than each
 // opening their own.
-func registerFriendsInviteRoutes(mux *http.ServeMux, c *friendsInviteController) {
+func registerFriendsInviteRoutes(ctx context.Context, mux *http.ServeMux, c *friendsInviteController) {
 	mux.HandleFunc("/invites/friends/start", func(w http.ResponseWriter, r *http.Request) {
-		c.Start(context.Background())
+		// ctx, not context.Background() - see invitewatcher.go's /invites/start handler for the
+		// full story (same orphaned-goroutine bug, same fix, same live-confirmed symptom).
+		c.Start(ctx)
 		fmt.Fprintln(w, "started")
 	})
 	mux.HandleFunc("/invites/friends/stop", func(w http.ResponseWriter, r *http.Request) {

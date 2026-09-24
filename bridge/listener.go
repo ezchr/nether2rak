@@ -61,14 +61,8 @@ func Listen(ctx context.Context, authSession *session.Session, netherNetID uint6
 	// routinely takes longer than that, and every live join attempt during testing
 	// (2026-08-14) failed with "start ICE: context deadline exceeded" at exactly the 5-second
 	// mark. 30 seconds matches what most WebRTC stacks use as an ICE connect timeout.
-	connCtx := func(parent context.Context, _ *nethernet.Conn) context.Context {
-		ctx, cancel := context.WithTimeout(parent, 30*time.Second)
-		// go-nethernet gives no completion callback for a Conn's lifetime, so release the
-		// timer when ctx itself ends (success, timeout, or parent cancellation alike) rather
-		// than discarding cancel - go vet: lostcancel flagged a live 30s timer per accepted
-		// connection that was never being released otherwise.
-		context.AfterFunc(ctx, cancel)
-		return ctx
+	connCtx := func(parent context.Context, _ *nethernet.Conn) (context.Context, context.CancelFunc) {
+		return context.WithTimeout(parent, 30*time.Second)
 	}
 
 	// Bedrock's own ICE implementation uses 4-character ufrags - real client offers
@@ -167,7 +161,8 @@ func (l *Listener) Serve(ctx, connCtx context.Context, cfg Config) error {
 			if !ok {
 				continue
 			}
-			l.log.Debug("accepted connection", "transport", name)
+			// remote shows the ICE route picked: "relay" means through a TURN server, not straight here.
+			l.log.Info("friends-tab connection accepted", "transport", name, "remote", nc.RemoteAddr())
 			go HandleConn(connCtx, nc, cfg)
 		}
 	}

@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"errors"
@@ -47,10 +49,15 @@ type ProxyConn struct {
 
 	nethernet bool
 
+	// clientEncryption makes the client-facing (nethernet) side run the Minecraft encryption
+	// handshake after login, as BDS does. See SetClientEncryption.
+	clientEncryption bool
+
 	loginDone bool
 
-	// encryptionEnabled records whether a ServerToClientHandshake was received and Minecraft-level
-	// encryption was turned on for this connection. See EncryptionEnabled.
+	// encryptionEnabled records whether a ServerToClientHandshake was received (or, on the
+	// client-facing side, sent) and Minecraft-level encryption was turned on for this connection.
+	// See EncryptionEnabled.
 	encryptionEnabled bool
 
 	hdr *packet.Header
@@ -126,6 +133,32 @@ func (c *ProxyConn) SetAuthEnabled(enabled bool) {
 	}
 }
 
+// SetClientEncryption turns on the encryption handshake with the joining client on a nethernet
+// (client-facing) connection. Without it a login is only a signed token, and that token is not
+// bound to this server: anyone holding a copy - any server the player joined in the last few hours
+// saw one - could replay it here and be relayed in as that player, with their real XUID. The
+// handshake needs the private key behind the token's cpk, which a replayer does not have. DTLS does
+// not help: it authenticates the transport, not the Minecraft identity.
+func (c *ProxyConn) SetClientEncryption(enabled bool) {
+	c.clientEncryption = enabled
+}
+
+// checkClientPacket rejects packets a joining client has no business sending during login.
+// ReadLoop serves both roles, so without this a client could end the login early with a
+// server-role packet - PlayStatus skipped authentication entirely, and ServerToClientHandshake
+// dereferenced a key this side never generated, panicking the whole relay process.
+func (c *ProxyConn) checkClientPacket(pk packet.Packet) error {
+	switch pk.(type) {
+	case *packet.ServerToClientHandshake, *packet.NetworkSettings, *packet.PlayStatus:
+		return fmt.Errorf("client sent %T during login", pk)
+	case *packet.ClientToServerHandshake:
+		if !c.encryptionEnabled {
+			return errors.New("client sent a handshake it was never asked for")
+		}
+	}
+	return nil
+}
+
 func (c *ProxyConn) ReadLoop() error {
 	for {
 		pks, err := c.ReadPackets()
@@ -144,6 +177,12 @@ func (c *ProxyConn) ReadLoop() error {
 				if err := decodePacket(pk, packetData.payload); err != nil {
 					c.conn.Close()
 					return err
+				}
+				if c.nethernet {
+					if err := c.checkClientPacket(pk); err != nil {
+						c.conn.Close()
+						return err
+					}
 				}
 				switch pk := pk.(type) {
 				case *packet.RequestNetworkSettings:
@@ -173,6 +212,12 @@ func (c *ProxyConn) ReadLoop() error {
 						// identity rather than ours. Stash the raw bytes for the bridge to
 						// pick up via RawLoginPacket().
 						c.rawLoginPacket = pkBytes
+						if c.encryptionEnabled {
+							// Not done yet: the client must answer the handshake handleLogin sent,
+							// which proves it holds the token's private key. The
+							// ClientToServerHandshake case below finishes the login.
+							continue
+						}
 						c.loginDone = true
 						c.deferRemaining(pks[i+1:])
 						return nil
@@ -295,7 +340,7 @@ func (conn *ProxyConn) handleLogin(pk *packet.Login) error {
 		_ = conn.WritePacket(&packet.Disconnect{Message: text.Colourf("<red>You must be logged in with XBOX Live to join.</red>")})
 		return fmt.Errorf("client was not authenticated to XBOX Live")
 	}
-	if !conn.nethernet {
+	if !conn.nethernet || conn.clientEncryption {
 		if err := conn.enableEncryption(authResult.PublicKey); err != nil {
 			return fmt.Errorf("enable encryption: %w", err)
 		}
@@ -335,6 +380,20 @@ func (conn *ProxyConn) handleNetworkSettings(pk *packet.NetworkSettings) error {
 // enableEncryption enables encryption on the server side over the connection. It sends an unencrypted
 // handshake packet to the client and enables encryption after that.
 func (conn *ProxyConn) enableEncryption(clientPublicKey *ecdsa.PublicKey) error {
+	// The server side never had a key or salt of its own until it started encrypting.
+	if conn.privateKey == nil {
+		key, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+		if err != nil {
+			return fmt.Errorf("generate handshake key: %w", err)
+		}
+		conn.privateKey = key
+	}
+	if conn.salt == nil {
+		conn.salt = make([]byte, 16)
+		if _, err := rand.Read(conn.salt); err != nil {
+			return fmt.Errorf("generate handshake salt: %w", err)
+		}
+	}
 	signer, _ := jose.NewSigner(jose.SigningKey{Key: conn.privateKey, Algorithm: jose.ES384}, &jose.SignerOptions{
 		ExtraHeaders: map[jose.HeaderKey]any{"x5u": login.MarshalPublicKey(&conn.privateKey.PublicKey)},
 	})
@@ -358,6 +417,7 @@ func (conn *ProxyConn) enableEncryption(clientPublicKey *ecdsa.PublicKey) error 
 	// Finally we enable encryption for the encoder and decoder using the secret key bytes we produced.
 	conn.enc.EnableEncryption(keyBytes)
 	conn.dec.EnableEncryption(keyBytes)
+	conn.encryptionEnabled = true
 
 	return nil
 }

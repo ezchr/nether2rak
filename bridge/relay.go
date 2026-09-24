@@ -78,10 +78,22 @@ type Config struct {
 	// no benefit.
 	FixNativeBDSPersistence bool
 
+	// DisableClientEncryption skips the encryption handshake with joining players. Leave it off:
+	// that handshake is what stops a copied login token from being replayed to join as someone
+	// else (see proxy.ProxyConn.SetClientEncryption). It exists only as a quick way back if a
+	// client version ever refuses the handshake.
+	DisableClientEncryption bool
+
 	// AllowXUID, if non-nil, is consulted for every connecting player; return false to reject.
 	// Leave nil to allow any XUID that passed real Xbox Live authentication to join, which is
 	// the whole point of this bridge versus a self-only tool like NetherConnect.
 	AllowXUID func(xuid string) bool
+
+	// OnJoin, if non-nil, is called once a player has actually been handed into the real backend
+	// - after AllowXUID has passed and the backend login has succeeded, not merely on Xbox Live
+	// authentication. Intended for friendactivity.Store.RecordJoin, so pruneinactive can later
+	// tell a friend who genuinely never plays from one who simply has not connected recently.
+	OnJoin func(xuid, displayName string)
 
 	Log *slog.Logger
 }
@@ -107,6 +119,7 @@ func HandleConn(ctx context.Context, conn *nethernet.Conn, cfg Config) {
 
 	clientConn := proxy.NewProxyConn(conn, true)
 	clientConn.SetAuthEnabled(true) // reject anyone not genuinely Xbox Live authenticated
+	clientConn.SetClientEncryption(!cfg.DisableClientEncryption)
 
 	if err := clientConn.ReadLoop(); err != nil {
 		log.Warn("client failed to log in", "err", err)
@@ -116,6 +129,12 @@ func HandleConn(ctx context.Context, conn *nethernet.Conn, cfg Config) {
 	}
 
 	identity := clientConn.IdentityData()
+	if identity.XUID == "" {
+		// ReadLoop only returns without an error once an authenticated login is done, so this is
+		// a guard against that ever regressing, not an expected path.
+		log.Warn("client finished login without an authenticated identity - dropping it")
+		return
+	}
 	if cfg.AllowXUID != nil && !cfg.AllowXUID(identity.XUID) {
 		log.Warn("rejected connection from disallowed xuid", "xuid", identity.XUID, "displayName", identity.DisplayName)
 		_ = clientConn.WritePacket(&packet.Disconnect{Message: "You are not allowed to join this server."})
@@ -166,6 +185,9 @@ func HandleConn(ctx context.Context, conn *nethernet.Conn, cfg Config) {
 	log.Info("relaying player into backend",
 		"transport", backendTransportName(cfg), "displayName", identity.DisplayName, "xuid", identity.XUID,
 		"backendEncrypted", serverConn.EncryptionEnabled())
+	if cfg.OnJoin != nil {
+		cfg.OnJoin(identity.XUID, identity.DisplayName)
+	}
 
 	errCh := make(chan error, 2)
 	go pump("client->backend", clientConn, serverConn, errCh)

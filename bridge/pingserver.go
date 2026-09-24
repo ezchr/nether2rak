@@ -106,15 +106,18 @@ func StartPingServer(addr string, log *slog.Logger) {
 		// leg is present (see below).
 		clientMs := l.client.Latency().Milliseconds() * 2
 		totalMs := clientMs
+		var backendMs int64
 		if l.backend != nil {
 			// The backend leg may still be nil very briefly after registerPing but before
 			// dialBackend succeeds (or forever, if the connection fails before reaching the
 			// backend at all) - report just the client leg in that case rather than blocking or
 			// returning an error, since that's still a real, useful number on its own.
-			totalMs += l.backend.Latency().Milliseconds() * 2
+			backendMs = l.backend.Latency().Milliseconds() * 2
+			totalMs += backendMs
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]int64{"ms": totalMs})
+		// client_ms / backend_ms are ms's two legs, for telling where a high reading comes from.
+		_ = json.NewEncoder(w).Encode(map[string]int64{"ms": totalMs, "client_ms": clientMs, "backend_ms": backendMs})
 	})
 
 	server := &http.Server{Addr: addr, Handler: mux, ReadTimeout: 5 * time.Second}

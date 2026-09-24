@@ -41,20 +41,10 @@ import (
 // implementation, github.com/df-mc/go-nethernet/endpoint.Client, which landed in go-nethernet
 // v1.0.20 (2026-08-10) and did not exist when this project pinned its dependency.
 //
-// It is a PORT rather than a plain import because v1.0.20 changed the nethernet.Signaling
-// interface in ways this project cannot take yet:
-//
-//   - Notify takes a nethernet.Notifier interface upstream; the pinned copy takes a
-//     `chan<- *nethernet.Signal`.
-//   - DisableTrickleICE is a method on Signaling upstream; on the pinned copy it is a field on
-//     nethernet.Dialer/ListenConfig.
-//
-// Upgrading to v1.0.20 outright would also drop this project's vendored DTLS-fingerprint
-// upper-casing patch (vendor-go-nethernet/{conn,identity}.go), which is still NOT upstream as of
-// v1.0.20 - verified 2026-09-15, upstream still emits pion's lowercase fingerprint.Value in both
-// places. Losing it reintroduces a failure where signaling and ICE both appear to succeed but the
-// remote peer never begins real connectivity checks. So the pin stays and the client is ported
-// across the interface gap instead.
+// It was ported rather than imported because this project was pinned to a go-nethernet snapshot
+// older than the endpoint package. The project now builds against upstream main, so this could be
+// replaced by importing endpoint.Client directly; it is kept as-is for now because it is the code
+// path that was live-tested against BDS and Geyser.
 //
 // The port keeps upstream's behaviour exactly, including three things the earlier hand-written
 // attempt in this codebase got wrong:
@@ -89,7 +79,7 @@ type httpSignaling struct {
 	log    *slog.Logger
 
 	notifiersMu sync.Mutex
-	notifiers   map[uint32]chan<- *nethernet.Signal
+	notifiers   map[uint32]nethernet.Notifier
 	notifyCount uint32
 	closed      bool
 }
@@ -106,7 +96,7 @@ func newHTTPSignaling(log *slog.Logger, client *http.Client) *httpSignaling {
 		networkID: strconv.FormatUint(mrand.Uint64(), 10),
 		client:    client,
 		log:       log,
-		notifiers: make(map[uint32]chan<- *nethernet.Signal),
+		notifiers: make(map[uint32]nethernet.Notifier),
 	}
 }
 
@@ -180,12 +170,12 @@ func (h *httpSignaling) Signal(ctx context.Context, signal *nethernet.Signal) er
 	}
 }
 
-// Notify registers signals to receive incoming signals, per the pinned Signaling interface.
-func (h *httpSignaling) Notify(signals chan<- *nethernet.Signal) (stop func()) {
+// Notify registers n to receive incoming signals.
+func (h *httpSignaling) Notify(n nethernet.Notifier) (stop func()) {
 	h.notifiersMu.Lock()
 	i := h.notifyCount
 	h.notifyCount++
-	h.notifiers[i] = signals
+	h.notifiers[i] = n
 	h.notifiersMu.Unlock()
 
 	return sync.OnceFunc(func() {
@@ -215,23 +205,22 @@ func (h *httpSignaling) NetworkID() string {
 // PongData is a no-op: this side only dials and never serves a ping.
 func (h *httpSignaling) PongData([]byte) {}
 
-// notifySignal delivers signal to every registered channel. The send is blocking, matching
-// signaling.Conn.Notify's own behaviour - Dialer registers a 64-buffered channel and starts
-// draining it before Signal is ever called, so this cannot stall a dial in practice.
+// notifySignal delivers signal to every registered notifier. Each dialer ignores signals whose
+// ConnectionID/NetworkID pair isn't its own, so broadcasting is safe.
 func (h *httpSignaling) notifySignal(signal *nethernet.Signal) {
 	h.notifiersMu.Lock()
 	if h.closed {
 		h.notifiersMu.Unlock()
 		return
 	}
-	channels := make([]chan<- *nethernet.Signal, 0, len(h.notifiers))
-	for _, ch := range h.notifiers {
-		channels = append(channels, ch)
+	notifiers := make([]nethernet.Notifier, 0, len(h.notifiers))
+	for _, n := range h.notifiers {
+		notifiers = append(notifiers, n)
 	}
 	h.notifiersMu.Unlock()
 
-	for _, ch := range channels {
-		ch <- signal
+	for _, n := range notifiers {
+		n.NotifySignal(signal)
 	}
 }
 

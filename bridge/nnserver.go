@@ -19,9 +19,9 @@ import (
 // server over HTTP signaling, this one IS a NetherNet server over HTTP signaling, so a player can
 // type this machine's address into the Bedrock server list and connect.
 //
-// It is a port of upstream's github.com/df-mc/go-nethernet/endpoint.Handler, adapted to the
-// pinned nethernet.Signaling interface for the reasons set out at the top of nnendpoint.go
-// (upstream's Notify takes a Notifier; the pin takes a channel).
+// It is a port of upstream's github.com/df-mc/go-nethernet/endpoint.Handler, made when this
+// project was pinned to a snapshot older than that package. Unlike upstream's Handler it serves a
+// live server-list entry (see motdFunc).
 //
 // How a direct-IP join reaches this, per upstream's own handler documentation: on an address
 // join, the Bedrock client sends GET /v1/join to each candidate URL in turn - https://host:port,
@@ -45,14 +45,14 @@ const negotiationTimeout = 15 * time.Second
 // entry in their server list.
 type motdFunc func(ctx context.Context) []byte
 
-// httpSignalingServer implements the pinned nethernet.Signaling interface on top of the HTTP
-// endpoints a Bedrock client probes, and is also the http.Handler serving them.
+// httpSignalingServer implements nethernet.Signaling on top of the HTTP endpoints a Bedrock
+// client probes, and is also the http.Handler serving them.
 //
 // The data flow for one join is worth stating plainly, because the Signaling interface reads
 // backwards for a server:
 //
-//  1. Client POSTs an SDP offer. handleOffer parks a reply channel and pushes the offer into the
-//     channel the nethernet.Listener registered through Notify.
+//  1. Client POSTs an SDP offer. handleOffer parks a reply channel and hands the offer to the
+//     nethernet.Listener registered through Notify.
 //  2. The Listener negotiates and calls Signal with the SDP answer - Signal is how the answer
 //     comes back IN, not how anything is sent out.
 //  3. Signal routes that answer to the parked channel, and handleOffer writes it as the HTTP
@@ -71,8 +71,8 @@ type httpSignalingServer struct {
 	pending   map[connectionKey]chan *nethernet.Signal
 	pendingMu sync.RWMutex
 
-	// notifier is the channel the single registered Listener reads offers from.
-	notifier   chan<- *nethernet.Signal
+	// notifier is the single registered Listener that receives offers.
+	notifier   nethernet.Notifier
 	notifierMu sync.RWMutex
 }
 
@@ -161,7 +161,7 @@ func (s *httpSignalingServer) handleOffer(w http.ResponseWriter, req *http.Reque
 	if err != nil {
 		log.Error("direct-ip join: negotiation failed", "err", err)
 		switch {
-		case errors.Is(err, errNoListener):
+		case errors.Is(err, errNoListener), errors.Is(err, errOfferRejected):
 			writeText(w, http.StatusServiceUnavailable, "Service unavailable")
 		case errors.Is(err, context.DeadlineExceeded):
 			writeText(w, http.StatusBadGateway, "Timed out waiting for answer")
@@ -218,10 +218,8 @@ func (s *httpSignalingServer) negotiate(ctx context.Context, networkID, offer st
 		s.pendingMu.Unlock()
 	}()
 
-	select {
-	case notifier <- signal:
-	case <-ctx.Done():
-		return nil, ctx.Err()
+	if !notifier.NotifySignal(signal) {
+		return nil, errOfferRejected
 	}
 
 	select {
@@ -230,18 +228,19 @@ func (s *httpSignalingServer) negotiate(ctx context.Context, networkID, offer st
 	case <-ctx.Done():
 		// Tell the Listener to abandon the half-negotiated connection rather than leaving it
 		// holding transports for a client that is no longer waiting on the other end.
-		select {
-		case notifier <- &nethernet.Signal{
+		notifier.NotifySignal(&nethernet.Signal{
 			Type:         nethernet.SignalTypeError,
 			ConnectionID: signal.ConnectionID,
 			Data:         strconv.FormatUint(nethernet.ErrorCodeNegotiationTimeoutWaitingForResponse, 10),
 			NetworkID:    signal.NetworkID,
-		}:
-		default:
-		}
+		})
 		return nil, ctx.Err()
 	}
 }
+
+// errOfferRejected reports that the Listener declined an offer, e.g. because it is shutting down
+// or already at its concurrent-negotiation limit.
+var errOfferRejected = errors.New("listener rejected offer")
 
 // Signal receives a signal FROM the registered Listener - normally the SDP answer for a client
 // currently blocked in handleOffer - and routes it to that request.
@@ -268,15 +267,15 @@ func (s *httpSignalingServer) Signal(ctx context.Context, signal *nethernet.Sign
 	}
 }
 
-// Notify registers the Listener's channel. Only one Listener may be registered: each offer
-// produces exactly one answer, and the HTTP response has nowhere to put a second one.
-func (s *httpSignalingServer) Notify(signals chan<- *nethernet.Signal) (stop func()) {
+// Notify registers the Listener. Only one Listener may be registered: each offer produces exactly
+// one answer, and the HTTP response has nowhere to put a second one.
+func (s *httpSignalingServer) Notify(n nethernet.Notifier) (stop func()) {
 	s.notifierMu.Lock()
 	if s.notifier != nil {
 		s.notifierMu.Unlock()
 		panic("bridge: httpSignalingServer.Notify: listener already registered")
 	}
-	s.notifier = signals
+	s.notifier = n
 	s.notifierMu.Unlock()
 
 	return sync.OnceFunc(func() {

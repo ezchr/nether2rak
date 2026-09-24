@@ -129,15 +129,16 @@ func (c *Conn) NetworkID() string {
 	return c.d.NetworkID
 }
 
-func (c *Conn) Notify(signals chan<- *nethernet.Signal) (stop func()) {
+// Notify forwards incoming signals to n until the connection ends. Each call competes for the
+// same stream rather than receiving its own copy, so exactly one Listener should be registered.
+func (c *Conn) Notify(n nethernet.Notifier) (stop func()) {
 	go func() {
 		for {
 			sig, err := c.ReadSignal()
 			if err != nil {
-				close(signals)
 				return
 			}
-			signals <- sig
+			n.NotifySignal(sig)
 		}
 	}()
 	return func() {

@@ -51,18 +51,33 @@ type Conn struct {
 }
 
 type pendingStore struct {
-	c                         *Conn
-	pendingSignals            []*nethernet.Signal
-	hasReceivedConnectRequest bool
-	lastActivity              time.Time
+	c              *Conn
+	pendingSignals []*nethernet.Signal
+	// hasReceivedDescription is set once the remote description for this connection has
+	// arrived - a SignalTypeOffer (we are the listener/answerer: a remote client is
+	// connecting to us) or a SignalTypeAnswer (we are the dialer: we sent an offer and this
+	// is the remote's response). Candidates that race ahead of that description over this
+	// unordered signaling channel are buffered here until it arrives, since pion has nothing
+	// to attach them to before a remote description is set.
+	//
+	// Originally this only flipped true on an Offer, which is correct for the listener role
+	// this code was first written for, but silently stranded every real ICE candidate forever
+	// when reused for the dialer role added later: a dialer never receives an Offer (it SENT
+	// the offer), so candidates that arrived after the real Answer just piled up in
+	// pendingSignals and were never delivered to the peer connection, timing out ICE with
+	// zero remote candidates to try. Confirmed 2026-09-17 against a real live join attempt:
+	// CONNECTRESPONSE (answer) was received and processed fine, but every CANDIDATEADD
+	// afterward logged "buffering candidate, no offer yet" and was never released.
+	hasReceivedDescription bool
+	lastActivity           time.Time
 }
 
 func (p *pendingStore) trySend(s *nethernet.Signal) {
 	p.lastActivity = time.Now()
-	if s.Type == nethernet.SignalTypeOffer {
-		p.c.log.Debug("DEBUGPATCH: trySend got offer, flushing pending", "connectionID", s.ConnectionID, "pendingCount", len(p.pendingSignals))
+	if s.Type == nethernet.SignalTypeOffer || s.Type == nethernet.SignalTypeAnswer {
+		p.c.log.Debug("DEBUGPATCH: trySend got description, flushing pending", "connectionID", s.ConnectionID, "type", s.Type, "pendingCount", len(p.pendingSignals))
 		p.c.signals <- s
-		p.hasReceivedConnectRequest = true
+		p.hasReceivedDescription = true
 		for _, s := range p.pendingSignals {
 			p.c.signals <- s
 		}
@@ -70,13 +85,13 @@ func (p *pendingStore) trySend(s *nethernet.Signal) {
 		return
 	}
 
-	if p.hasReceivedConnectRequest || s.Type != nethernet.SignalTypeCandidate {
-		p.c.log.Debug("DEBUGPATCH: trySend forwarding immediately", "connectionID", s.ConnectionID, "type", s.Type, "hasReceivedConnectRequest", p.hasReceivedConnectRequest)
+	if p.hasReceivedDescription || s.Type != nethernet.SignalTypeCandidate {
+		p.c.log.Debug("DEBUGPATCH: trySend forwarding immediately", "connectionID", s.ConnectionID, "type", s.Type, "hasReceivedDescription", p.hasReceivedDescription)
 		p.c.signals <- s
 		return
 	}
 
-	p.c.log.Debug("DEBUGPATCH: trySend buffering candidate, no offer yet", "connectionID", s.ConnectionID)
+	p.c.log.Debug("DEBUGPATCH: trySend buffering candidate, no description yet", "connectionID", s.ConnectionID)
 	p.pendingSignals = append(p.pendingSignals, s)
 }
 
@@ -190,7 +205,12 @@ func (j *Conn) handleCallback(ctx context.Context, req *jrpc2.Request) (result a
 			}
 
 			j.log.Debug("DEBUGPATCH: received inbound signal", "from", msg.From, "type", signal.Type, "connectionID", signal.ConnectionID, "networkID", signal.NetworkID)
-			if signal.Type == nethernet.SignalTypeCandidate || signal.Type == nethernet.SignalTypeOffer {
+			// Answer must also route through pendingStore, not just Offer/Candidate: as the
+			// dialer, the Answer is what unblocks buffered candidates (see pendingStore's doc
+			// comment) - routing it straight to j.signals instead would deliver the remote
+			// description fine but leave every already-buffered or later-arriving candidate
+			// stranded forever, since nothing else would ever flip hasReceivedDescription.
+			if signal.Type == nethernet.SignalTypeCandidate || signal.Type == nethernet.SignalTypeOffer || signal.Type == nethernet.SignalTypeAnswer {
 				id := signal.ConnectionID
 				j.pendingStoreMu.Lock()
 				if _, ok := j.pendingStore[id]; !ok {
@@ -295,15 +315,16 @@ func (c *Conn) Context() context.Context {
 	return c.ctx
 }
 
-func (c *Conn) Notify(signals chan<- *nethernet.Signal) (stop func()) {
+// Notify forwards incoming signals to n until the connection ends. Each call competes for the
+// same stream rather than receiving its own copy, so exactly one Listener should be registered.
+func (c *Conn) Notify(n nethernet.Notifier) (stop func()) {
 	go func() {
 		for {
 			sig, err := c.ReadSignal()
 			if err != nil {
-				close(signals)
 				return
 			}
-			signals <- sig
+			n.NotifySignal(sig)
 		}
 	}()
 	return func() {

@@ -174,7 +174,18 @@ func (c *inviteController) run(ctx context.Context) {
 func startInviteControlServer(ctx context.Context, addr string, c *inviteController, friendsCtl *friendsInviteController, log *slog.Logger) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/invites/start", func(w http.ResponseWriter, r *http.Request) {
-		c.Start(context.Background())
+		// ctx (this server's own sessionCtx param), not context.Background(): a loop rooted in
+		// Background() outlives the session generation that started it. When the session rebuilds
+		// (a new xblSession/inviteController/HTTP server, ~8x/day - see this function's own doc
+		// comment on the HTTP server's shutdown wiring), the OLD controller's goroutine kept
+		// running forever, invisible to and unstoppable by the NEW controller's /invites/stop -
+		// confirmed live 2026-09-22: /invites/stop and /invites/status both correctly reported
+		// "stopped" on the current generation while an orphaned goroutine from a prior generation
+		// kept sending invites every 10s regardless, until the whole process was killed. Tying the
+		// loop to ctx means a session rebuild cancels any in-flight loop along with the HTTP
+		// server, so there is never more than one live goroutine and start/stop/status on the
+		// currently-listening server always reflect the actual running state.
+		c.Start(ctx)
 		fmt.Fprintln(w, "started")
 	})
 	mux.HandleFunc("/invites/stop", func(w http.ResponseWriter, r *http.Request) {
@@ -190,7 +201,7 @@ func startInviteControlServer(ctx context.Context, addr string, c *inviteControl
 	})
 	// /invites/friends/* - see friendsinviter.go. Registered on this same mux/port rather than
 	// opening a second listener, since it's the same control-plane trust model (loopback only).
-	registerFriendsInviteRoutes(mux, friendsCtl)
+	registerFriendsInviteRoutes(ctx, mux, friendsCtl)
 
 	server := &http.Server{Addr: addr, Handler: mux}
 	// ctx is sessionCtx from runSession's caller, not the process-lifetime ctx - this server is

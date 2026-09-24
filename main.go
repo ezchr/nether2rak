@@ -26,6 +26,7 @@ import (
 	"github.com/gameparrot/netherconnect/proxy"
 	"github.com/gameparrot/netherconnect/session"
 	"github.com/gameparrot/netherconnect/xbl"
+	"github.com/gameparrot/netherconnect/xbl/friendactivity"
 	"github.com/sandertv/gophertunnel/minecraft/auth"
 	"github.com/sandertv/gophertunnel/minecraft/protocol/packet"
 	"golang.org/x/oauth2"
@@ -66,9 +67,55 @@ func main() {
 	}
 	log := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level}))
 
+	// `-login [FILE]`: sign in (or reuse FILE's cached token) and broadcast as an EXTRA
+	// broadcaster under that account, in THIS process, until Ctrl+C - a standalone
+	// broadcast-only run, not a one-shot sign-in step. It does not touch config.json and does
+	// not require restarting whatever main relay process is already running: this is meant to
+	// be started and left running as its own process, the same way the main relay is, just
+	// scoped to one extra account. See runLoginBroadcast in broadcasts.go.
+	//
+	// FILE is optional. Given with no FILE, it picks the next unused "tokenN.json" itself
+	// (token2.json, token3.json, ... - token.json is always the primary) so running
+	// `-login` repeatedly, once per extra account, needs no filename bookkeeping.
+	//
+	// It still shares config.json's BACKEND settings (transport/address/compression/allowed
+	// XUIDs) - those describe the server being broadcast, not the account - but starts neither
+	// a ping server nor a direct-IP door: both are already running in the main relay process
+	// and a second one here would either fight over the same port or duplicate the front door.
+	args := os.Args[1:]
+	for i, a := range args {
+		if a == "-login" || a == "--login" {
+			file := ""
+			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				file = args[i+1]
+			}
+			if file == "" {
+				file = nextTokenFile(".")
+				fmt.Printf("No filename given - using %s (the next unused tokenN.json).\n", file)
+			}
+			runLoginBroadcast(file, debug, log)
+			return
+		}
+	}
+
 	cfg, err := loadConfig("config.json")
 	if err != nil {
 		log.Error("failed to load config.json", "err", err)
+		os.Exit(1)
+	}
+	if d := sharedPlayerDrift(cfg); d != nil {
+		log.Info("advertised player count drifts", "min", d.min, "max", d.max, "maxStep", d.maxStep,
+			"every", d.interval, "start", d.Current())
+	}
+
+	// Records the last time each connecting friend actually reached a real backend, so
+	// cmd/friends/pruneinactive can later tell apart a friend who genuinely never plays from one
+	// who simply has not connected in a while. See friendactivity's own package doc for why this
+	// is a plain file the relay writes rather than something pruneinactive computes itself - it
+	// has no other way to know who has actually joined.
+	friendActivity, err := friendactivity.Open("friend_activity.txt", log)
+	if err != nil {
+		log.Error("failed to open friend activity file", "err", err)
 		os.Exit(1)
 	}
 
@@ -88,7 +135,11 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	tokSrc, err := tokenSource(log)
+	// The primary broadcast's account (token.json). Signed in here, before the per-broadcast
+	// code, because the direct-IP front door below also relays with this account's identity.
+	// Its identity/RTA/friend-request/session setup now lives in runBroadcast (broadcasts.go),
+	// which also runs each of cfg.ExtraBroadcasts under its own account.
+	tokSrc, err := tokenSource(log, tokenCacheFile, "primary")
 	if err != nil {
 		log.Error("failed to authenticate", "err", err)
 		os.Exit(1)
@@ -100,60 +151,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	xstsTok, err := authSession.RequestXBLToken(ctx, "http://xboxlive.com")
-	if err != nil {
-		log.Error("failed to get xbox live identity", "err", err)
-		os.Exit(1)
-	}
-	xuid := xstsTok.AuthorizationToken.DisplayClaims.UserInfo[0].XUID
-	gamertag := xstsTok.AuthorizationToken.DisplayClaims.UserInfo[0].GamerTag
-	log.Info("authenticated", "gamertag", gamertag, "xuid", xuid)
-
-	// --- RTA: needed for a valid connectionId before we can create a session, and to react
-	// to session-membership changes (nonce refresh) and incoming friend requests in real time.
-	rta := xbl.NewRTA(authSession, xuid, log)
-	go func() {
-		for {
-			if err := rta.Connect(ctx); err != nil && ctx.Err() == nil {
-				log.Warn("rta connection dropped, reconnecting", "err", err)
-				time.Sleep(3 * time.Second)
-				continue
-			}
-			return
-		}
-	}()
-	// Blocks until RTA's first connection ID arrives - just to fail fast at startup if RTA can
-	// never connect at all. The actual value isn't kept: runSession re-reads rta.ConnectionID
-	// itself on every call, since a mid-process RTA reconnect changes it (confirmed 2026-08-21:
-	// passing this as a fixed value here meant every session rebuild after an RTA reconnect used
-	// a dead connection ID, and Xbox Live correctly rejected session creation for it with "the
-	// owner isn't active in the referenced session" - see RTA.ConnectionID's doc comment).
-	if _, err := rta.ConnectionID(ctx); err != nil {
-		log.Error("failed to obtain rta connection id", "err", err)
-		os.Exit(1)
-	}
-
 	// --- Real-latency ping API for the Folia-side PingDisplay plugin (loopback only). Port is
 	// configurable (see PingPort's doc comment) for the same multi-instance reason as pprof's.
+	// One per process: it answers for every broadcast (entries are keyed by player XUID).
 	bridge.StartPingServer(fmt.Sprintf("127.0.0.1:%d", cfg.PingPort), log)
-
-	// --- Friend request handling.
-	//
-	// FriendManager.Run drives this: an immediate scan at startup (catches up on requests
-	// received entirely while this relay was offline), then RTA's push notification as the fast
-	// path, falling back to a periodic scan since that push was found, in real operation, to go
-	// silently quiet indefinitely after some reconnects - see FriendManager.Run's own doc comment
-	// for the real incident that motivated this (three pending requests found sitting unprocessed
-	// with zero related log output).
-	friends := xbl.NewFriendManager(authSession, log)
-	go friends.Run(ctx)
-	rta.OnFriendRequest = func() {
-		select {
-		case friends.Trigger <- struct{}{}:
-		default:
-			// Already a trigger pending; Run will pick it up on its next iteration regardless.
-		}
-	}
 
 	var allowXUID func(string) bool
 	if len(cfg.AllowedXUIDs) > 0 {
@@ -209,14 +210,14 @@ func main() {
 	// session) because it has no dependency on Xbox Live signaling - it only needs the backend.
 	// It is handed the same bridge.Config the Friends-tab listener gets below, which is what
 	// makes both paths resolve a player to one backend record.
-	if cfg.DirectIPEnabled {
+	if cfg.RelayDirectIP {
 		if err := bridge.StartDirectIP(ctx, bridge.DirectIPConfig{
-			ListenAddress: cfg.DirectIPListenAddress,
+			ListenAddress: cfg.RelayDirectIPListenAddress,
 			WorldName:     cfg.WorldName,
 			MaxPlayers:    cfg.MaxPlayers,
 			Protocol:      cfg.Protocol,
 			Version:       cfg.Version,
-			Relay:         relayConfig(cfg, authSession, allowXUID, log),
+			Relay:         relayConfig(cfg, authSession, allowXUID, friendActivity, log),
 			Log:           log,
 		}); err != nil {
 			log.Error("failed to start direct-ip front door", "err", err)
@@ -228,90 +229,24 @@ func main() {
 
 	log.Info("running - press Ctrl+C to stop (there is no console prompt; this process just waits for connections)")
 
-	// The signaling websocket's Authorization header is a snapshot of our MC multiplayer token
-	// taken once at dial time and never refreshed (see runSession's ValidUntil comment) - Xbox
-	// Live was observed unilaterally closing it with "Signaling server instance is shutting
-	// down." once that token lapsed (confirmed 2026-08-20, run.log), which runSession now
-	// preempts on its own schedule via errTokenRenewal. Serve can still die for other reasons
-	// (real network drops, Xbox Live hiccups), so this loop remains the fallback either way:
-	// rebuild the listener and the Xbox Live session (both are tied to the specific
-	// netherNetID/pmsgID the old listener obtained) and keep going, the same way the RTA
-	// connection above already reconnects on drop, instead of leaving the process idle and
-	// requiring a manual restart every time this happens.
-	const maxBackoff = 30 * time.Second
-	backoff := time.Second
-	consecutiveFailures := 0
-	// sessionID persists across every runSession call (including token-renewal and error
-	// retries) rather than being regenerated per call - see xbl.New's doc comment for why:
-	// a fresh sessionID on every rebuild silently orphans already-connected players from
-	// Xbox Live's own session bookkeeping, even though their game connection keeps working.
-	var sessionID string
-	// netherNetID likewise persists for the whole process - see bridge.Listen's doc comment:
-	// regenerating it per rebuild strands any client that cached the old ID in its Friends tab.
-	var netherNetID uint64
-	for {
-		var err error
-		sessionID, netherNetID, err = runSession(ctx, authSession, rta, xuid, sessionID, netherNetID, cfg, allowXUID, debug, log)
-		if ctx.Err() != nil {
-			return
-		}
-		switch {
-		case errors.Is(err, errTokenRenewal):
-			log.Info("restarting session for scheduled token renewal")
-			// MCToken() is a lazy cache: it only re-fetches once the cached token's own
-			// ValidUntil has passed. The proactive-renewal timer above intentionally fires a
-			// few minutes BEFORE that (see the timer's own comment), specifically so the
-			// rebuild finishes before Xbox Live force-closes the old signaling socket - but
-			// that means the cached token is still "valid" by MCToken()'s check when runSession
-			// calls it again here, so bridge.Listen just gets handed the same soon-to-expire
-			// token instead of a fresh one. The new listener then schedules ANOTHER proactive
-			// renewal about a minute later against that same stale token, and the cycle repeats
-			// every ~60s (floor-clamped by renewIn's `< time.Minute` guard) until the token
-			// finally expires for real and a genuine fetch happens - thrashing the whole
-			// NetherNet/session stack for several minutes on every scheduled renewal. Confirmed
-			// 2026-08-22: five consecutive rebuilds one minute apart, each logging the exact
-			// same validUntil with a shrinking validFor, before a real 4h token finally landed.
-			// Forcing a real refresh here breaks the loop: the rebuild actually gets what it
-			// asked for on the first attempt.
-			if _, refreshErr := authSession.ForceRefreshMCToken(ctx); refreshErr != nil {
-				log.Error("failed to force-refresh mc token for scheduled renewal", "err", refreshErr)
-			}
-			backoff = time.Second
-			consecutiveFailures = 0
-			continue
-		case err != nil:
-			log.Error("session ended, restarting", "err", err)
-			consecutiveFailures++
-		default:
-			log.Warn("listener stopped with no error, restarting")
-			consecutiveFailures++
-		}
-		// A cached MC token can look valid by its own ValidUntil while a session-creation call
-		// still fails for unrelated reasons (e.g. presence lapsing on rebuild, fixed separately
-		// in runSession - see the ordering comment there). This is a defensive fallback for the
-		// case where the token itself genuinely has gone stale server-side despite ValidUntil
-		// not yet having passed; MCToken's normal lazy refresh can't detect that on its own, so
-		// after a few consecutive failures force a real refresh rather than retrying with the
-		// same cached token indefinitely.
-		const forceRefreshAfter = 3
-		if consecutiveFailures >= forceRefreshAfter {
-			log.Warn("repeated session failures, forcing mc token refresh",
-				"consecutiveFailures", consecutiveFailures)
-			if _, refreshErr := authSession.ForceRefreshMCToken(ctx); refreshErr != nil {
-				log.Error("failed to force-refresh mc token", "err", refreshErr)
-			}
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(backoff):
-		}
-		if backoff < maxBackoff {
-			backoff *= 2
-			if backoff > maxBackoff {
-				backoff = maxBackoff
-			}
-		}
+	// Extra broadcasts (config extra_broadcasts, see broadcasts.go): each signs in its own
+	// account and runs in the background; a problem with one never stops the others.
+	extras, problems := resolveBroadcasts(cfg)
+	for _, p := range problems {
+		log.Error(p)
+	}
+	for _, b := range extras {
+		log.Info("starting extra broadcast", "broadcast", b.Name, "tokenFile", b.TokenFile, "worldName", b.WorldName)
+		go runExtraBroadcast(ctx, b, cfg, allowXUID, friendActivity, debug, log)
+	}
+
+	// The primary broadcast runs on this goroutine until shutdown, as before. If its account
+	// can't get going at all, the process exits - exactly the old behaviour.
+	primaryCfg := cfg
+	primaryCfg.ExtraBroadcasts = nil
+	if err := runBroadcast(ctx, "primary", authSession, primaryCfg, allowXUID, friendActivity, debug, log); err != nil && ctx.Err() == nil {
+		log.Error("primary broadcast failed to start", "err", err)
+		os.Exit(1)
 	}
 }
 
@@ -320,7 +255,7 @@ func main() {
 // disconnect (expected to happen periodically - see the comment above the call site) results in
 // a clean reconnect instead of the process going idle.
 func runSession(ctx context.Context, authSession *session.Session, rta *xbl.RTA, xuid, sessionID string,
-	netherNetID uint64, cfg FileConfig, allowXUID func(string) bool, debug bool, log *slog.Logger) (string, uint64, error) {
+	netherNetID uint64, cfg FileConfig, allowXUID func(string) bool, friendActivity *friendactivity.Store, debug bool, log *slog.Logger) (string, uint64, error) {
 
 	// Re-read every call, not passed in once by the caller: the RTA websocket can reconnect
 	// mid-process (main's own goroutine handles that independently), which changes this value -
@@ -336,29 +271,22 @@ func runSession(ctx context.Context, authSession *session.Session, rta *xbl.RTA,
 	}
 	log.Info("nethernet listeners ready", "netherNetID", netherNetID, "pmsgID", pmsgID)
 
-	// MemberCount must reflect the XBL session's own member count, which always includes the
-	// host account itself as member 0 - confirmed against a live working session capture, which
-	// showed MemberCount:1 with zero real players connected. Sending 0 here contradicts the
-	// session's own "members" map (which always has at least one entry) and is a likely reason
-	// the world was filtered from the Friends tab. FakePlayerCount, when set above zero,
-	// overrides this floor for display purposes only - it was already a config field but had
-	// never actually been wired in, so it silently had no effect (config showed 21, Friends tab
-	// showed 1).
-	displayedPlayers := 1
-	if cfg.FakePlayerCount > 0 {
-		displayedPlayers = cfg.FakePlayerCount
+	// Player count shown on the Friends tab: fake_player_count, drifting inside
+	// fake_player_drift's range when that is set, never below 1 - see advertisedPlayers.
+	worldInfo := func() xbl.Config {
+		return xbl.Config{
+			HostName:   cfg.HostName,
+			WorldName:  cfg.WorldName,
+			Players:    advertisedPlayers(cfg),
+			MaxPlayers: cfg.MaxPlayers,
+			Protocol:   cfg.Protocol,
+			Version:    cfg.Version,
+		}
 	}
 
 	xblSession := xbl.New(authSession, xuid, sessionID, connectionID, pmsgID, netherNetID, log)
 	sessionID = xblSession.SessionID()
-	xblSession.SetWorldInfo(xbl.Config{
-		HostName:   cfg.HostName,
-		WorldName:  cfg.WorldName,
-		Players:    displayedPlayers,
-		MaxPlayers: cfg.MaxPlayers,
-		Protocol:   cfg.Protocol,
-		Version:    cfg.Version,
-	})
+	xblSession.SetWorldInfo(worldInfo())
 
 	sessionCtx, cancelSession := context.WithCancelCause(ctx)
 	defer cancelSession(nil)
@@ -493,9 +421,14 @@ func runSession(ctx context.Context, authSession *session.Session, rta *xbl.RTA,
 	// not ctx, bounds the loop's max lifetime - a session rebuild must stop it along with
 	// everything else that references the old xblSession, since this XUID list belongs to the
 	// specific session being recreated.
-	inviteCtl := newInviteController(xblSession, log)
-	friendsInviteCtl := newFriendsInviteController(authSession, xblSession, log)
-	startInviteControlServer(sessionCtx, fmt.Sprintf("127.0.0.1:%d", cfg.InvitePort), inviteCtl, friendsInviteCtl, log)
+	//
+	// Only when this broadcast has an invite_port of its own - extra broadcasts default to 0
+	// (off), since two broadcasts can't share one control port.
+	if cfg.InvitePort > 0 {
+		inviteCtl := newInviteController(xblSession, log)
+		friendsInviteCtl := newFriendsInviteController(authSession, xblSession, log)
+		startInviteControlServer(sessionCtx, fmt.Sprintf("127.0.0.1:%d", cfg.InvitePort), inviteCtl, friendsInviteCtl, log)
+	}
 
 	if debug {
 		time.Sleep(3 * time.Second)
@@ -510,6 +443,7 @@ func runSession(ctx context.Context, authSession *session.Session, rta *xbl.RTA,
 			case <-sessionCtx.Done():
 				return
 			case <-ticker.C:
+				xblSession.SetWorldInfo(worldInfo()) // picks up fake_player_drift's next value
 				if err := xblSession.Update(sessionCtx); err != nil {
 					log.Error("failed to update session", "err", err)
 				}
@@ -532,7 +466,7 @@ func runSession(ctx context.Context, authSession *session.Session, rta *xbl.RTA,
 	// torn down and rebuilt when sessionCtx ends; a healthy in-progress WebRTC transport for a
 	// connected player has nothing to do with whether the signaling websocket that originally
 	// negotiated it is still open.
-	err = ln.Serve(sessionCtx, ctx, relayConfig(cfg, authSession, allowXUID, log))
+	err = ln.Serve(sessionCtx, ctx, relayConfig(cfg, authSession, allowXUID, friendActivity, log))
 	if errors.Is(context.Cause(sessionCtx), errTokenRenewal) {
 		return sessionID, netherNetID, errTokenRenewal
 	}
@@ -546,7 +480,7 @@ func runSession(ctx context.Context, authSession *session.Session, rta *xbl.RTA,
 // listener and the direct-IP listener are served with the value this returns, deliberately: any
 // difference between them would be a difference in how a player's identity reaches the backend,
 // which is the exact problem this build exists to eliminate.
-func relayConfig(cfg FileConfig, authSession *session.Session, allowXUID func(string) bool, log *slog.Logger) bridge.Config {
+func relayConfig(cfg FileConfig, authSession *session.Session, allowXUID func(string) bool, friendActivity *friendactivity.Store, log *slog.Logger) bridge.Config {
 	return bridge.Config{
 		NetherNetIdentity: func(ctx context.Context) (*nethernet.Identity, error) {
 			return bridge.NewClientIdentity(ctx, authSession)
@@ -555,7 +489,9 @@ func relayConfig(cfg FileConfig, authSession *session.Session, allowXUID func(st
 		GeyserAddress:           cfg.GeyserAddress,
 		NetherNetBackendAddress: cfg.NetherNetBackendAddress,
 		FixNativeBDSPersistence: cfg.FixNativeBDSPersistence,
+		DisableClientEncryption: cfg.DisableClientEncryption,
 		AllowXUID:               allowXUID,
+		OnJoin:                  friendActivity.RecordJoin,
 		Log:                     log,
 	}
 }
@@ -598,8 +534,11 @@ func checkOwnPresence(ctx context.Context, authSession *session.Session, xuid st
 // tokenSource performs (or reloads a cached) Microsoft device-code login, printing the
 // "go to microsoft.com/link and enter this code" instructions to stdout - headless equivalent
 // of what auth_utils.go does with a Fyne popup, and what MCXboxBroadcast's Java logs do too.
-func tokenSource(log *slog.Logger) (oauth2.TokenSource, error) {
-	cachePath := filepath.Join(".", tokenCacheFile)
+//
+// file is the token cache (token.json for the primary broadcast, each extra broadcast's own
+// token_file otherwise); label names the broadcast in the sign-in prompt.
+func tokenSource(log *slog.Logger, file, label string) (oauth2.TokenSource, error) {
+	cachePath := filepath.Join(".", file)
 
 	if b, err := os.ReadFile(cachePath); err == nil {
 		tok := new(oauth2.Token)
@@ -612,7 +551,7 @@ func tokenSource(log *slog.Logger) (oauth2.TokenSource, error) {
 		}
 	}
 
-	fmt.Println("Signing in with a Microsoft account - this should be the account you want the world to appear to be hosted by.")
+	fmt.Printf("[%s] Signing in with a Microsoft account for %s - this should be the account you want the world to appear to be hosted by.\n", label, file)
 	tok, err := deviceAuth.RequestLiveTokenWriter(os.Stdout)
 	if err != nil {
 		return nil, fmt.Errorf("request live token: %w", err)

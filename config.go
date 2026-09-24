@@ -41,6 +41,14 @@ type FileConfig struct {
 	// real member count. Zero reports the session's own count honestly.
 	FakePlayerCount int `json:"fake_player_count"`
 
+	// FakePlayerDrift, when set with max above zero, makes the advertised count wander inside
+	// [min, max] instead of sitting on fake_player_count: every update_interval_seconds it moves
+	// by a random amount of at most max_step (possibly 0). It starts at fake_player_count clamped
+	// into the range (or the range's middle), and is capped at max_players-1 because a world
+	// showing as full can't be joined. One value is shared by every broadcast in the process.
+	// Example: "fake_player_drift": {"min": 16, "max": 26, "max_step": 2}. See drift.go.
+	FakePlayerDrift *PlayerDriftConfig `json:"fake_player_drift,omitempty"`
+
 	// Protocol/Version must match the Bedrock protocol Geyser is actually speaking. Check
 	// Geyser's own logs/supported-versions for the current value - this changes with every
 	// Bedrock update (see the 26.40 devlog notes about protocol drift).
@@ -78,20 +86,40 @@ type FileConfig struct {
 	// and does not need or want this - see bridge.Config.FixNativeBDSPersistence.
 	FixNativeBDSPersistence bool `json:"fix_native_bds_persistence"`
 
-	// DirectIPEnabled turns on the second front door: players joining by typing this
-	// machine's address into their Bedrock server list, rather than through the Friends tab.
-	//
-	// Both doors relay through the same code path, so a player gets the same backend player
-	// record either way (see proxy/self_signed_id.go). With this off, a direct IP join would
-	// have to reach the backend server directly and would resolve to a different record.
-	DirectIPEnabled bool `json:"direct_ip_enabled"`
+	// DisableClientEncryption skips the Minecraft encryption handshake with joining players. Keep
+	// it false: the handshake proves a player holds the key behind their login token, so a token
+	// copied from another server cannot be replayed here to join as that player - which, with
+	// xuidforward restoring real XUIDs on BDS, would mean their save data and op. Only turn it on
+	// if a client version starts failing to join with "client failed to log in" in the log.
+	DisableClientEncryption bool `json:"disable_client_encryption"`
 
-	// DirectIPListenAddress is the host:port the direct-IP front door listens on, e.g.
-	// ":19132" - the address players type. It is TCP: a Bedrock client probes
-	// GET /v1/join there before it will consider a RakNet connection.
+	// RelayDirectIP does NOT by itself decide whether a direct-IP join can reach this machine -
+	// that is up to whatever listener the backend itself has open (or a firewall, or a
+	// backend-native public door like Dragonfly's own listener). What this flag decides is
+	// whether a direct-IP connection, once it does arrive, gets routed through the relay's
+	// identity-unifying code path (the same HandleConn Friends-tab joins use) instead of
+	// reaching the backend raw and unrelayed.
+	//
+	// Both doors relay through the same code path when this is on, so a player gets the same
+	// backend player record either way (see proxy/self_signed_id.go). With this off, a direct
+	// IP join - if the backend is reachable at all - goes straight to the backend and resolves
+	// to a different record than a Friends-tab join would.
+	//
+	// This exists for backends like native BDS, which discards the real XUID on a raw
+	// self-signed login and needs the relay's derived SelfSignedID to resolve the same player
+	// record every time (see FixNativeBDSPersistence above). Backends that resolve identity by
+	// real XUID regardless of SelfSignedID (Dragonfly, Geyser, PNX) do not need this - turning
+	// it on for them just adds a second, redundant listener with no persistence benefit.
+	RelayDirectIP bool `json:"relay_direct_ip"`
+
+	// RelayDirectIPListenAddress is the host:port this relay's own direct-IP listener binds to
+	// when RelayDirectIP is on, e.g. ":19132" - the address players type. It is TCP: a Bedrock
+	// client probes GET /v1/join there before it will consider a RakNet connection. This
+	// listener IS the relay (see bridge/directip.go) - there is no mode where this address is
+	// open without going through RelayDirectIP's identity-unifying logic.
 	//
 	// It must not collide with the backend's own port.
-	DirectIPListenAddress string `json:"direct_ip_listen_address"`
+	RelayDirectIPListenAddress string `json:"relay_direct_ip_listen_address"`
 
 	// InvitePort is the loopback port the invite-everyone-from-another-server control endpoint
 	// listens on (see invitewatcher.go). The feature itself is OFF BY DEFAULT regardless of this
@@ -109,6 +137,31 @@ type FileConfig struct {
 	// PprofPort is the loopback port the Go profiler listens on in -debug mode. Same
 	// multi-instance caveat as PingPort.
 	PprofPort int `json:"pprof_port"`
+
+	// ExtraBroadcasts publishes the same backend as additional Friends-tab worlds, each hosted
+	// by its OWN Xbox account (its own token file). Every Xbox session is capped at 30 members
+	// (maxMembersCount in Minecraft's MinecraftLobby session template - read from a live
+	// session document 2026-09-23), so each extra account adds another 30 join slots. The
+	// primary broadcast (token.json, host_name, world_name above) is unchanged and always runs.
+	// See broadcasts.go.
+	ExtraBroadcasts []BroadcastConfig `json:"extra_broadcasts"`
+}
+
+// BroadcastConfig is one extra Friends-tab broadcast. Only TokenFile is required.
+type BroadcastConfig struct {
+	// Name labels this broadcast's log lines. Default: "extra-1", "extra-2", ...
+	Name string `json:"name"`
+	// TokenFile is this account's cached Microsoft token, relative to the run directory, e.g.
+	// "token2.json". Create it with `./nether2rak-unified -login token2.json`, signing in with
+	// a DIFFERENT Xbox account from token.json and every other broadcast.
+	TokenFile string `json:"token_file"`
+	// HostName / WorldName shown on the Friends tab. Default: the primary's.
+	HostName  string `json:"host_name"`
+	WorldName string `json:"world_name"`
+	// InvitePort, if above zero, starts this broadcast's own invite control server on that
+	// loopback port (see invitewatcher.go). Default 0: off - the primary's invite_port can't be
+	// shared, and every broadcast's control server needs a port of its own.
+	InvitePort int `json:"invite_port"`
 }
 
 func defaultConfig() FileConfig {
@@ -131,8 +184,8 @@ func defaultConfig() FileConfig {
 		Compression:             "snappy",
 		CompressionThreshold:    256,
 		FixNativeBDSPersistence: false,
-		DirectIPEnabled:         false,
-		DirectIPListenAddress:   ":19132",
+		RelayDirectIP:              false,
+		RelayDirectIPListenAddress: ":19132",
 		InvitePort:              7782,
 		PingPort:                7777,
 		PprofPort:               6060,

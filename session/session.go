@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/df-mc/go-playfab"
@@ -20,6 +21,14 @@ import (
 )
 
 type Session struct {
+	// mu guards every mutable field below. Session is shared across goroutines in cmd/scraper
+	// (the main scrape loop and xbl.FriendManager's accept loop both call into the same
+	// *Session concurrently) with no other synchronization, so unguarded reads/writes here are
+	// a real data race, not just a theoretical one - confirmed 2026-09-17 while investigating an
+	// apparent scraper hang that turned out to be a slow NetherNet dial, but the race exists
+	// regardless of whether it caused that particular symptom.
+	mu sync.Mutex
+
 	cache           *auth.XBLTokenCache
 	env             service.AuthorizationEnvironment
 	playfabIdentity *playfab.Identity
@@ -49,6 +58,9 @@ func (s *Session) login(ctx context.Context) error {
 		return fmt.Errorf("init discovery: %w", err)
 	}
 
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	region, _ := language.English.Region()
 	s.conf = service.TokenConfig{
 		Device: service.DeviceConfig{
@@ -72,11 +84,11 @@ func (s *Session) login(ctx context.Context) error {
 
 	s.cache = s.config.NewTokenCache()
 
-	if err = s.loginWithPlayfab(ctx); err != nil {
+	if err = s.loginWithPlayfabLocked(ctx); err != nil {
 		return err
 	}
 
-	return s.obtainMcToken(ctx)
+	return s.obtainMcTokenLocked(ctx)
 }
 
 func (s *Session) initDiscovery(ctx context.Context) error {
@@ -85,6 +97,8 @@ func (s *Session) initDiscovery(ctx context.Context) error {
 		return fmt.Errorf("discover: %w", err)
 	}
 
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if err := discovery.Environment(&s.env); err != nil {
 		return fmt.Errorf("decode environment: %w", err)
 	}
@@ -92,10 +106,17 @@ func (s *Session) initDiscovery(ctx context.Context) error {
 	return nil
 }
 
-func (s *Session) loginWithPlayfab(ctx context.Context) (err error) {
+// loginWithPlayfabLocked does the actual work and assumes s.mu is already held by the caller.
+func (s *Session) loginWithPlayfabLocked(ctx context.Context) (err error) {
 	identityProvider := playfab.XBLIdentityProvider{
 		TokenSource: &xblTokenSource{
-			TokenSource:  s,
+			// Not s itself: xblTokenSource.Token() below calls TokenSource.Token(), and s's own
+			// public Token() takes s.mu - which this method's caller already holds, so that call
+			// would self-deadlock (confirmed 2026-09-17: goroutine 1 stuck on sync.Mutex.Lock at
+			// this exact call chain, login -> loginWithPlayfabLocked -> xblTokenSource.Token ->
+			// s.Token -> s.mu.Lock again). lockedTokenSource calls s.tokenLocked() directly,
+			// which assumes the lock is already held instead of trying to take it again.
+			TokenSource:  lockedTokenSource{s},
 			relyingParty: playfab.RelyingParty,
 			ctx:          auth.WithXBLTokenCache(ctx, s.cache),
 		},
@@ -112,8 +133,9 @@ func (s *Session) loginWithPlayfab(ctx context.Context) (err error) {
 	return nil
 }
 
-func (s *Session) obtainMcToken(ctx context.Context) (err error) {
-	playfabIdentity, err := s.PlayfabIdentity(ctx)
+// obtainMcTokenLocked does the actual work and assumes s.mu is already held by the caller.
+func (s *Session) obtainMcTokenLocked(ctx context.Context) (err error) {
+	playfabIdentity, err := s.playfabIdentityLocked(ctx)
 	if err != nil {
 		return err
 	}
@@ -140,13 +162,23 @@ func (s *Session) RequestXBLToken(ctx context.Context, relyingParty string) (*au
 	if err != nil {
 		return nil, fmt.Errorf("obtain live token: %w", err)
 	}
-	return auth.RequestXBLToken(auth.WithXBLTokenCache(ctx, s.cache), tok, relyingParty)
+	s.mu.Lock()
+	cache := s.cache
+	s.mu.Unlock()
+	return auth.RequestXBLToken(auth.WithXBLTokenCache(ctx, cache), tok, relyingParty)
 }
 
 // PlayfabIdentity returns the user's Playfab identity, which includes the session ticket.
 func (s *Session) PlayfabIdentity(ctx context.Context) (*playfab.Identity, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.playfabIdentityLocked(ctx)
+}
+
+// playfabIdentityLocked does the actual work and assumes s.mu is already held by the caller.
+func (s *Session) playfabIdentityLocked(ctx context.Context) (*playfab.Identity, error) {
 	if pastExpirationTime(s.playfabIdentity.EntityToken.Expiration) {
-		if err := s.loginWithPlayfab(ctx); err != nil {
+		if err := s.loginWithPlayfabLocked(ctx); err != nil {
 			return nil, err
 		}
 	}
@@ -155,10 +187,12 @@ func (s *Session) PlayfabIdentity(ctx context.Context) (*playfab.Identity, error
 
 // MCToken returns the session token, or refreshes it if it has expired.
 func (s *Session) MCToken(ctx context.Context) (*service.Token, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	// s.mcToken is nil before the very first successful obtainMcToken call - guard explicitly
 	// rather than dereferencing .ValidUntil on it, which panics.
 	if s.mcToken == nil || pastExpirationTime(s.mcToken.ValidUntil) {
-		if err := s.obtainMcToken(ctx); err != nil {
+		if err := s.obtainMcTokenLocked(ctx); err != nil {
 			return nil, err
 		}
 	}
@@ -174,7 +208,9 @@ func (s *Session) MCToken(ctx context.Context) (*service.Token, error) {
 // directly rather than waiting on MCToken's lazy expiry check, which has no way to know the
 // cached token stopped actually working server-side.
 func (s *Session) ForceRefreshMCToken(ctx context.Context) (*service.Token, error) {
-	if err := s.obtainMcToken(ctx); err != nil {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.obtainMcTokenLocked(ctx); err != nil {
 		return nil, err
 	}
 	return s.mcToken, nil
@@ -194,6 +230,8 @@ func (s *Session) LegacyMultiplayerXBL(ctx context.Context) (tok *auth.XBLToken,
 // value is read from service discovery rather than hardcoded so it follows whichever environment
 // this session actually authenticated against.
 func (s *Session) AuthorizationServiceURI() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.env.ServiceURI == nil {
 		return ""
 	}
@@ -211,6 +249,13 @@ func (s *Session) MultiplayerToken(ctx context.Context, key *ecdsa.PublicKey) (j
 }
 
 func (s *Session) Token() (*oauth2.Token, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.tokenLocked()
+}
+
+// tokenLocked does the actual work and assumes s.mu is already held by the caller.
+func (s *Session) tokenLocked() (*oauth2.Token, error) {
 	if s.tok.Valid() {
 		return s.tok, nil
 	}
@@ -234,6 +279,16 @@ type mcTokenSource struct {
 
 func (m *mcTokenSource) ServiceToken(context.Context) (*service.Token, error) {
 	return m.mcToken, nil
+}
+
+// lockedTokenSource adapts a *Session to oauth2.TokenSource for use from a context where s.mu is
+// already held, by calling tokenLocked directly instead of the public, self-locking Token method.
+type lockedTokenSource struct {
+	s *Session
+}
+
+func (l lockedTokenSource) Token() (*oauth2.Token, error) {
+	return l.s.tokenLocked()
 }
 
 // xblTokenSource is an implementation of [xsapi.TokenSource].

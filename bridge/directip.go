@@ -77,14 +77,8 @@ func StartDirectIP(ctx context.Context, cfg DirectIPConfig) error {
 	// replaces go-nethernet's 5s default, which real ICE negotiation routinely overruns; the
 	// 4-character ICE ufrag matches what Bedrock's own implementation emits, since pion's
 	// 16-character default may exceed what the client's STUN parser accepts.
-	connCtx := func(parent context.Context, _ *nethernet.Conn) context.Context {
-		ctx, cancel := context.WithTimeout(parent, 30*time.Second)
-		// go-nethernet gives no completion callback for a Conn's lifetime, so release the
-		// timer when ctx itself ends (success, timeout, or parent cancellation alike) rather
-		// than discarding cancel - go vet: lostcancel flagged a live 30s timer per accepted
-		// connection that was never being released otherwise.
-		context.AfterFunc(ctx, cancel)
-		return ctx
+	connCtx := func(parent context.Context, _ *nethernet.Conn) (context.Context, context.CancelFunc) {
+		return context.WithTimeout(parent, 30*time.Second)
 	}
 	settings := webrtc.SettingEngine{}
 	settings.SetICECredentials(randomICEString(4), randomICEString(24))
