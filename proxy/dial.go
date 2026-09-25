@@ -136,6 +136,9 @@ func (c *ProxyConn) ForwardIdentity(protocolID int32, identityData login.Identit
 	if fixNativeBDSPersistence {
 		clientData.SelfSignedID = selfSignedIDFromXUID(identityData.XUID)
 	}
+	// ThirdPartyName is written by the client, not by Xbox Live. The backend trusts this login
+	// as-is, so hand it the verified name instead of whatever the client typed there.
+	clientData.ThirdPartyName = identityData.DisplayName
 	c.clientData = clientData
 	c.protocolId = protocolID
 
