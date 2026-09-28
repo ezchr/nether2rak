@@ -55,13 +55,16 @@ type activitySearchOwner struct {
 // project's own hosting code publishes via SessionCustomProperties, since the endpoint being
 // queried here is the read side of the exact same session document CreateSessionRequest writes.
 type ActiveSession struct {
-	Ref    SessionRef              `json:"sessionRef"`
-	Custom SessionCustomProperties `json:"customProperties"`
+	// HandleID is the activity handle, which JoinSession joins the session through.
+	HandleID string                  `json:"id"`
+	Ref      SessionRef              `json:"sessionRef"`
+	Custom   SessionCustomProperties `json:"customProperties"`
 }
 
 // activityHandleResponse is the raw shape of one element in handles/query's "results" array -
 // only the fields this package actually reads are declared; the real response has more.
 type activityHandleResponse struct {
+	ID               string                  `json:"id"`
 	SessionRef       SessionRef              `json:"sessionRef"`
 	CustomProperties SessionCustomProperties `json:"customProperties"`
 }
@@ -115,7 +118,7 @@ func ActivitiesForXUIDs(ctx context.Context, authSession *session.Session, xuids
 
 	out := make([]ActiveSession, 0, len(parsed.Results))
 	for _, r := range parsed.Results {
-		out = append(out, ActiveSession{Ref: r.SessionRef, Custom: r.CustomProperties})
+		out = append(out, ActiveSession{HandleID: r.ID, Ref: r.SessionRef, Custom: r.CustomProperties})
 	}
 	return out, nil
 }
