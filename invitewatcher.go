@@ -171,7 +171,8 @@ func (c *inviteController) run(ctx context.Context) {
 // startInviteControlServer serves the loopback-only start/stop/status endpoint for c. Mirrors
 // bridge.StartPingServer's shape exactly (loopback bind, plain HTTP, no auth - relies on the
 // port never being reachable off the VPS, same trust model as the ping API and pprof).
-func startInviteControlServer(ctx context.Context, addr string, c *inviteController, friendsCtl *friendsInviteController, log *slog.Logger) {
+// adderCtx outlives ctx on purpose: the friend adder is process-wide (see friendadder.go).
+func startInviteControlServer(ctx, adderCtx context.Context, addr string, c *inviteController, friendsCtl *friendsInviteController, adder *friendAdder, log *slog.Logger) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/invites/start", func(w http.ResponseWriter, r *http.Request) {
 		// ctx (this server's own sessionCtx param), not context.Background(): a loop rooted in
@@ -202,6 +203,7 @@ func startInviteControlServer(ctx context.Context, addr string, c *inviteControl
 	// /invites/friends/* - see friendsinviter.go. Registered on this same mux/port rather than
 	// opening a second listener, since it's the same control-plane trust model (loopback only).
 	registerFriendsInviteRoutes(ctx, mux, friendsCtl)
+	registerFriendAddRoutes(adderCtx, mux, adder)
 
 	server := &http.Server{Addr: addr, Handler: mux}
 	// ctx is sessionCtx from runSession's caller, not the process-lifetime ctx - this server is

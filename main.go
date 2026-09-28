@@ -427,7 +427,8 @@ func runSession(ctx context.Context, authSession *session.Session, rta *xbl.RTA,
 	if cfg.InvitePort > 0 {
 		inviteCtl := newInviteController(xblSession, log)
 		friendsInviteCtl := newFriendsInviteController(authSession, xblSession, log)
-		startInviteControlServer(sessionCtx, fmt.Sprintf("127.0.0.1:%d", cfg.InvitePort), inviteCtl, friendsInviteCtl, log)
+		adder := friendAdderFor(cfg.InvitePort, authSession, xuid, log)
+		startInviteControlServer(sessionCtx, ctx, fmt.Sprintf("127.0.0.1:%d", cfg.InvitePort), inviteCtl, friendsInviteCtl, adder, log)
 	}
 
 	if debug {
