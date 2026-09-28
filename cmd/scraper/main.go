@@ -226,7 +226,7 @@ func main() {
 		}
 		var runErr error
 		if friendXUID != "" {
-			runErr = scrapeFriendOnce(ctx, tokSrc, authSession, selfXUID, friendXUID, seen, out, log)
+			runErr = scrapeFriendOnce(ctx, tokSrc, authSession, selfXUID, friendXUID, *friendTarget, seen, out, log)
 		} else {
 			runErr = scrapeOnce(ctx, address, tokSrc, seen, out, log)
 		}

@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"math/rand/v2"
+	"strings"
 	"time"
 
 	"github.com/gameparrot/netherconnect/messaging"
@@ -49,10 +50,26 @@ type closableSignaling interface {
 // no open session right now", which the caller's reconnect loop treats identically to a dropped
 // connection: wait reconnectDelay, try again. A friend starting a world after this process
 // started is picked up on the very next retry, not only at process start.
-func scrapeFriendOnce(ctx context.Context, tokSrc oauth2.TokenSource, authSession *session.Session, selfXUID, friendXUID string, seen map[string]bool, out *queueWriter, log *slog.Logger) error {
+func scrapeFriendOnce(ctx context.Context, tokSrc oauth2.TokenSource, authSession *session.Session, selfXUID, friendXUID, friendName string, seen map[string]bool, out *queueWriter, log *slog.Logger) error {
 	activities, err := xbl.ActivitiesForXUIDs(ctx, authSession, []string{friendXUID})
 	if err != nil {
 		return fmt.Errorf("look up active session for xuid %s: %w", friendXUID, err)
+	}
+	if len(activities) == 0 {
+		// The host need not be our friend: a world also shows on our Friends tab when a friend
+		// of ours is playing in it, and that is the only way to find it then - the host's own
+		// lookup comes back empty. Seen 2026-09-28 with a world hosted by a non-friend that one
+		// of the account's friends had joined.
+		worlds, err := friendWorlds(ctx, authSession)
+		if err != nil {
+			return fmt.Errorf("look up friends' worlds: %w", err)
+		}
+		for _, w := range worlds {
+			if w.Custom.OwnerId == friendXUID || strings.EqualFold(w.Custom.HostName, friendName) {
+				activities = append(activities, w)
+				break
+			}
+		}
 	}
 	if len(activities) == 0 {
 		return fmt.Errorf("xuid %s has no open session right now", friendXUID)
