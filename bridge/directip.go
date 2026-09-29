@@ -226,7 +226,7 @@ func (p *serverListProvider) body(ctx context.Context) []byte {
 // backendEntry reads the backend's own server-list JSON. Only meaningful when the backend is
 // itself a NetherNet server; a RakNet backend has no such endpoint and this simply fails.
 func (p *serverListProvider) backendEntry(ctx context.Context) (*serverListEntry, error) {
-	if backendTransportName(p.cfg.Relay) != TransportNetherNet {
+	if !BackendSpeaksNetherNet(p.cfg.Relay) {
 		return nil, fmt.Errorf("backend is not nethernet")
 	}
 	address, err := NormalizeNetherNetAddress(p.cfg.Relay.NetherNetBackendAddress)

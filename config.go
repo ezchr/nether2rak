@@ -8,12 +8,24 @@ import (
 type FileConfig struct {
 	// BackendTransport selects how the relay reaches the backend server:
 	//
-	//	"raknet"    - (default) a RakNet server such as Geyser, dialed at GeyserAddress.
-	//	"nethernet" - a Bedrock Dedicated Server started with transport=nethernet, reached at
-	//	              NetherNetBackendAddress over WebRTC. The relay is then NetherNet on both
-	//	              legs and no RakNet is involved anywhere in the path.
+	//	"raknet"            - (default) a RakNet server such as Geyser, dialed at GeyserAddress.
+	//	"nethernet"         - a server started with transport=nethernet, reached at
+	//	                      NetherNetBackendAddress over WebRTC. The relay is then NetherNet on
+	//	                      both legs and no RakNet is involved anywhere in the path.
+	//	"nethernet-norelay" - as above, except this process stays out of the data path: it keeps
+	//	                      the Xbox Live session and signaling (which no Bedrock server can hold
+	//	                      itself) but forwards each SDP offer to the backend, so the player's
+	//	                      client and the backend negotiate WebRTC directly. No game packet ever
+	//	                      passes through here. See bridge/norelay.go.
 	//
-	// The client-facing side is always NetherNet regardless; this only changes the backend leg.
+	// The client-facing side is always NetherNet regardless; the first two only change the backend
+	// leg, while the third removes the backend leg entirely.
+	//
+	// "nethernet-norelay" moves player authentication to the backend, because nothing verifies an
+	// identity here and forwards it on any more - the backend receives the player's own signed
+	// login. That is a security improvement, but only if the backend actually checks it: a native
+	// BDS in this mode wants online-mode=true, since the online-mode=false it needs behind a relay
+	// would let anyone claim any XUID once players can reach it directly.
 	BackendTransport string `json:"backend_transport"`
 
 	// GeyserAddress is host:port of Geyser's RakNet listener. Geyser's listener MUST have
@@ -22,7 +34,8 @@ type FileConfig struct {
 	GeyserAddress string `json:"geyser_address"`
 
 	// NetherNetBackendAddress is the base URL of the backend's NetherNet HTTP signaling
-	// endpoint, e.g. "http://127.0.0.1:19134". Only used when BackendTransport is "nethernet".
+	// endpoint, e.g. "http://127.0.0.1:19134". Used when BackendTransport is "nethernet" or
+	// "nethernet-norelay".
 	//
 	// This is the backend's TCP server-port - the same port named by server-port in BDS's
 	// server.properties - because that is where a BDS running transport=nethernet serves the

@@ -106,57 +106,19 @@ func newHTTPSignaling(log *slog.Logger, client *http.Client) *httpSignaling {
 // expects answers to arrive asynchronously, even though this transport happens to produce one
 // synchronously.
 func (h *httpSignaling) Signal(ctx context.Context, signal *nethernet.Signal) error {
-	u, err := url.Parse(signal.NetworkID)
-	if err != nil {
-		return fmt.Errorf("parse network ID as URL: %w", err)
-	}
-	if (u.Scheme != "https" && u.Scheme != "http") || u.Path != "" || u.Port() == "" {
-		return fmt.Errorf("network ID must be a HTTP/HTTPS URL with port: %s", signal.NetworkID)
-	}
-
 	switch signal.Type {
 	case nethernet.SignalTypeOffer:
-		requestURL := u.JoinPath("/v1/join", h.networkID).String()
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, requestURL, strings.NewReader(signal.Data))
-		if err != nil {
-			return fmt.Errorf("make request: %w", err)
-		}
-		req.Header.Set("Content-Type", "application/sdp")
-		// What the real Bedrock client's HTTP stack identifies itself as.
-		req.Header.Set("User-Agent", "libhttpclient/1.0.0.0")
-
-		resp, err := h.client.Do(req)
+		answer, err := postSDPOffer(ctx, h.client, signal.NetworkID, h.networkID, signal.Data)
 		if err != nil {
 			return err
 		}
-		defer resp.Body.Close()
-
-		if resp.StatusCode != http.StatusOK {
-			return fmt.Errorf("%s %s: %s", req.Method, req.URL, resp.Status)
-		}
-		b, err := io.ReadAll(io.LimitReader(resp.Body, maxSDPBodySize+1))
-		if err != nil {
-			return fmt.Errorf("read response body: %w", err)
-		}
-		if int64(len(b)) > maxSDPBodySize {
-			return fmt.Errorf("SDP answer exceeds %d bytes", maxSDPBodySize)
-		}
-		if len(b) == 0 {
-			return errors.New("missing SDP answer in response body")
-		}
-		// A body that parses as a bare integer is a NetherNet error code, not an answer - the
-		// server rejected the negotiation and said why in-band with a 200.
-		if errorCode, err := strconv.ParseUint(string(b), 10, 32); err == nil {
-			return fmt.Errorf("negotiation failed with error code: %d", errorCode)
-		}
-
 		// ConnectionID and NetworkID must be echoed back exactly: Dialer.notifySignals drops any
 		// signal whose pair doesn't match the dial in progress, and a dropped answer shows up as
 		// nothing more informative than a negotiation timeout.
 		h.notifySignal(&nethernet.Signal{
 			Type:         nethernet.SignalTypeAnswer,
 			ConnectionID: signal.ConnectionID,
-			Data:         string(b),
+			Data:         answer,
 			NetworkID:    signal.NetworkID,
 		})
 		return nil
@@ -168,6 +130,62 @@ func (h *httpSignaling) Signal(ctx context.Context, signal *nethernet.Signal) er
 	default:
 		return fmt.Errorf("unknown signal type: %s", signal.Type)
 	}
+}
+
+// postSDPOffer POSTs an SDP offer to a NetherNet server's join endpoint and returns the SDP
+// answer it responds with. baseURL is the server's base URL; ownID is the CALLER's own network
+// ID, which forms the /v1/join/{networkID} path segment - see the NetworkID direction note at the
+// top of this file, because getting these two the wrong way round is what produced BDS's
+// `400 Expected /v1/join/{networkId}`.
+//
+// Shared by httpSignaling (the relay's backend dial) and signalBroker (the no-relay mode's
+// forward), so the request shape BDS was verified to accept is only written down once.
+func postSDPOffer(ctx context.Context, client *http.Client, baseURL, ownID, offer string) (string, error) {
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		return "", fmt.Errorf("parse network ID as URL: %w", err)
+	}
+	if (u.Scheme != "https" && u.Scheme != "http") || u.Path != "" || u.Port() == "" {
+		return "", fmt.Errorf("network ID must be a HTTP/HTTPS URL with port: %s", baseURL)
+	}
+	if client == nil {
+		client = http.DefaultClient
+	}
+
+	requestURL := u.JoinPath("/v1/join", ownID).String()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, requestURL, strings.NewReader(offer))
+	if err != nil {
+		return "", fmt.Errorf("make request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/sdp")
+	// What the real Bedrock client's HTTP stack identifies itself as.
+	req.Header.Set("User-Agent", "libhttpclient/1.0.0.0")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("%s %s: %s", req.Method, req.URL, resp.Status)
+	}
+	b, err := io.ReadAll(io.LimitReader(resp.Body, maxSDPBodySize+1))
+	if err != nil {
+		return "", fmt.Errorf("read response body: %w", err)
+	}
+	if int64(len(b)) > maxSDPBodySize {
+		return "", fmt.Errorf("SDP answer exceeds %d bytes", maxSDPBodySize)
+	}
+	if len(b) == 0 {
+		return "", errors.New("missing SDP answer in response body")
+	}
+	// A body that parses as a bare integer is a NetherNet error code, not an answer - the server
+	// rejected the negotiation and said why in-band with a 200.
+	if errorCode, err := strconv.ParseUint(string(b), 10, 32); err == nil {
+		return "", fmt.Errorf("negotiation failed with error code: %d", errorCode)
+	}
+	return string(b), nil
 }
 
 // Notify registers n to receive incoming signals.

@@ -35,6 +35,12 @@ type Listener struct {
 
 	wsListener  *nethernet.Listener
 	msgListener *nethernet.Listener
+
+	// brokers is populated instead of the listeners above when the backend transport is
+	// TransportNetherNetNoRelay. A broker answers no offer itself - it forwards each one to the
+	// backend so the client negotiates with it directly - so there is no nethernet.Listener to
+	// build and no connection to accept. See norelay.go.
+	brokers []*signalBroker
 }
 
 // Listen starts both signaling transports. It returns the listener, the uint64 network ID for
@@ -52,8 +58,13 @@ type Listener struct {
 // no setter for it) and its setupNetherNet() rebinds new signaling onto that same
 // sessionInfo.getNetherNetId() every time it tears the transport down and back up.
 // Confirmed 2026-08-22 against MCXboxBroadcast source at /root/mcjava/n2r-java/MCXboxBroadcast.
-func Listen(ctx context.Context, authSession *session.Session, netherNetID uint64, log *slog.Logger) (*Listener, uint64, string, error) {
+// cfg selects what each signaling transport is wired to: a nethernet.Listener that answers offers
+// here (the relay modes) or a signalBroker that forwards them to the backend
+// (TransportNetherNetNoRelay). Everything else about the two paths - which transports are dialed,
+// which IDs are advertised - is identical, because the Xbox Live side cannot tell the difference.
+func Listen(ctx context.Context, authSession *session.Session, netherNetID uint64, cfg Config, log *slog.Logger) (*Listener, uint64, string, error) {
 	l := &Listener{log: log}
+	noRelay := BackendBypassesRelay(cfg)
 
 	// go-nethernet defaults to a hardcoded 5-second context for starting the ICE/DTLS/SCTP
 	// transports of every accepted Conn when ConnContext is left nil. Real-world ICE
@@ -74,6 +85,27 @@ func Listen(ctx context.Context, authSession *session.Session, netherNetID uint6
 	settings := webrtc.SettingEngine{}
 	settings.SetICECredentials(randomICEString(4), randomICEString(24))
 	api := webrtc.NewAPI(webrtc.WithSettingEngine(settings))
+
+	// attach wires one dialed signaling transport to whichever handler the mode calls for. In
+	// no-relay mode nothing local terminates the connection, so no WebRTC settings apply - the
+	// ICE credentials and connection timeouts above belong to peer connections this process
+	// builds, and it builds none.
+	attach := func(name string, sig nethernet.Signaling, dst **nethernet.Listener) error {
+		if noRelay {
+			broker, err := newSignalBroker(name, sig, cfg, log)
+			if err != nil {
+				return err
+			}
+			l.brokers = append(l.brokers, broker)
+			return nil
+		}
+		ln, err := nethernet.ListenConfig{Log: log, ConnContext: connCtx, API: api}.Listen(sig)
+		if err != nil {
+			return err
+		}
+		*dst = ln
+		return nil
+	}
 
 	var pmsgID string
 
@@ -99,15 +131,11 @@ func Listen(ctx context.Context, authSession *session.Session, netherNetID uint6
 		if err != nil {
 			log.Warn("websocket signaling unavailable, continuing without it", "err", err)
 			netherNetID = 0
+		} else if err := attach("websocket", wsSig, &l.wsListener); err != nil {
+			log.Warn("could not listen on websocket signaling", "err", err)
+			netherNetID = 0
 		} else {
-			ln, err := nethernet.ListenConfig{Log: log, ConnContext: connCtx, API: api}.Listen(wsSig)
-			if err != nil {
-				log.Warn("could not listen on websocket signaling", "err", err)
-				netherNetID = 0
-			} else {
-				l.wsListener = ln
-				log.Info("websocket signaling listener started", "netherNetID", netherNetID)
-			}
+			log.Info("websocket signaling listener started", "netherNetID", netherNetID, "noRelay", noRelay)
 		}
 	}
 
@@ -119,22 +147,18 @@ func Listen(ctx context.Context, authSession *session.Session, netherNetID uint6
 		msgSig, err := msgDialer.DialContext(ctx, mcTok)
 		if err != nil {
 			log.Warn("messaging signaling unavailable, continuing without it", "err", err)
+		} else if err := attach("messaging", msgSig, &l.msgListener); err != nil {
+			log.Warn("could not listen on messaging signaling", "err", err)
 		} else {
-			ln, err := nethernet.ListenConfig{Log: log, ConnContext: connCtx, API: api}.Listen(msgSig)
-			if err != nil {
-				log.Warn("could not listen on messaging signaling", "err", err)
-			} else {
-				l.msgListener = ln
-				pmsgID = msgSig.NetworkID()
-				// Identify ourselves to the client by our numeric NetherNetId,
-				// matching what real hosts put in the signaling payload.
-				msgSig.SetNetherNetID(strconv.FormatUint(numericNetherNetID, 10))
-				log.Info("messaging signaling listener started", "pmsgID", pmsgID)
-			}
+			pmsgID = msgSig.NetworkID()
+			// Identify ourselves to the client by our numeric NetherNetId,
+			// matching what real hosts put in the signaling payload.
+			msgSig.SetNetherNetID(strconv.FormatUint(numericNetherNetID, 10))
+			log.Info("messaging signaling listener started", "pmsgID", pmsgID, "noRelay", noRelay)
 		}
 	}
 
-	if l.wsListener == nil && l.msgListener == nil {
+	if l.wsListener == nil && l.msgListener == nil && len(l.brokers) == 0 {
 		return nil, 0, "", fmt.Errorf("no nethernet signaling transport could be started")
 	}
 	return l, netherNetID, pmsgID, nil
@@ -148,6 +172,22 @@ func Listen(ctx context.Context, authSession *session.Session, netherNetID uint6
 func (l *Listener) Serve(ctx, connCtx context.Context, cfg Config) error {
 	var wg sync.WaitGroup
 	errCh := make(chan error, 2)
+
+	// No-relay mode: each broker only needs its signaling subscription to stay up, since every
+	// connection it negotiates belongs to the client and the backend and never reaches this
+	// process. connCtx has nothing to govern here - there are no accepted connections to outlive
+	// a session cycle - and because a broker holds no player's transport, losing signaling costs
+	// nothing beyond new joins until the session is rebuilt.
+	if len(l.brokers) > 0 {
+		for _, broker := range l.brokers {
+			wg.Add(1)
+			go func(broker *signalBroker) {
+				defer wg.Done()
+				errCh <- broker.Run(ctx)
+			}(broker)
+		}
+		return <-errCh
+	}
 
 	accept := func(name string, ln *nethernet.Listener) {
 		defer wg.Done()

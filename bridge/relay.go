@@ -37,6 +37,13 @@ import (
 const (
 	TransportRakNet    = "raknet"
 	TransportNetherNet = "nethernet"
+
+	// TransportNetherNetNoRelay keeps the Xbox Live session and its signaling here but takes this
+	// process out of the data path entirely: offers are forwarded to the backend's own HTTP
+	// signaling endpoint so the player's client and the backend negotiate WebRTC directly. See
+	// norelay.go. Nothing in this file runs in that mode - there is no backend leg to dial and no
+	// login to forward, because the backend receives the player's own unmodified login instead.
+	TransportNetherNetNoRelay = "nethernet-norelay"
 )
 
 // backendDialTimeout bounds a single backend dial attempt. RakNet's own Dial has an internal
@@ -88,6 +95,13 @@ type Config struct {
 	// Leave nil to allow any XUID that passed real Xbox Live authentication to join, which is
 	// the whole point of this bridge versus a self-only tool like NetherConnect.
 	AllowXUID func(xuid string) bool
+
+	// VerifyPlayerToken verifies a client identity token was issued by Minecraft's authorization
+	// service and returns who it names. Used only in TransportNetherNetNoRelay, where no login
+	// passes through this process to learn the XUID from: AllowXUID and OnJoin are applied to the
+	// identity in the player's SDP offer instead, and only once it verifies. See
+	// norelay_identity.go and SessionTokenVerifier.
+	VerifyPlayerToken func(ctx context.Context, token string) (PlayerToken, error)
 
 	// OnJoin, if non-nil, is called once a player has actually been handed into the real backend
 	// - after AllowXUID has passed and the backend login has succeeded, not merely on Xbox Live
@@ -219,6 +233,24 @@ func backendTransportName(cfg Config) string {
 	return TransportRakNet
 }
 
+// BackendSpeaksNetherNet reports whether the backend is reached over NetherNet HTTP signaling at
+// NetherNetBackendAddress, which is true of both NetherNet modes. Callers that only need to know
+// whether the backend has a /v1/join endpoint should use this rather than comparing the name.
+func BackendSpeaksNetherNet(cfg Config) bool {
+	switch backendTransportName(cfg) {
+	case TransportNetherNet, TransportNetherNetNoRelay:
+		return true
+	default:
+		return false
+	}
+}
+
+// BackendBypassesRelay reports whether players negotiate straight to the backend rather than
+// through this process. See norelay.go.
+func BackendBypassesRelay(cfg Config) bool {
+	return backendTransportName(cfg) == TransportNetherNetNoRelay
+}
+
 // dialBackend opens the backend leg using whichever transport is configured.
 // dialBackend opens the backend leg and, for a NetherNet backend, also returns the private key
 // used for that connection's transport identity assertion - the caller (HandleConn) must sign the
@@ -252,8 +284,13 @@ func dialBackend(ctx context.Context, cfg Config, log *slog.Logger) (backendConn
 			transportKey = identity.PrivateKey
 		}
 		return conn, transportKey, nil
+	case TransportNetherNetNoRelay:
+		// HandleConn is never reached in this mode: signalBroker hands the negotiation to the
+		// backend and no connection is ever accepted here to be relayed.
+		return nil, nil, fmt.Errorf("backend transport %q does not dial a backend leg", name)
 	default:
-		return nil, nil, fmt.Errorf("unknown backend transport %q (want %q or %q)", name, TransportRakNet, TransportNetherNet)
+		return nil, nil, fmt.Errorf("unknown backend transport %q (want %q, %q or %q)",
+			name, TransportRakNet, TransportNetherNet, TransportNetherNetNoRelay)
 	}
 }
 

@@ -187,13 +187,36 @@ func main() {
 	switch strings.ToLower(strings.TrimSpace(cfg.BackendTransport)) {
 	case "", bridge.TransportRakNet:
 		log.Info("relaying into backend over raknet", "address", cfg.GeyserAddress)
-	case bridge.TransportNetherNet:
+	case bridge.TransportNetherNet, bridge.TransportNetherNetNoRelay:
 		normalized, err := bridge.NormalizeNetherNetAddress(cfg.NetherNetBackendAddress)
 		if err != nil {
 			log.Error("invalid nethernet_backend_address in config.json", "err", err)
 			os.Exit(1)
 		}
-		log.Info("relaying into backend over nethernet", "address", normalized)
+		if strings.EqualFold(strings.TrimSpace(cfg.BackendTransport), bridge.TransportNetherNetNoRelay) {
+			// The direct-IP door relays through HandleConn, which has no backend leg to dial in
+			// this mode, so every join through it would fail. Refuse the combination outright
+			// rather than advertise a door that cannot work: in no-relay mode the proxy in front
+			// (nginx) should route direct-IP players to the backend itself.
+			if cfg.RelayDirectIP {
+				log.Error("relay_direct_ip cannot be used with backend_transport \"nethernet-norelay\": " +
+					"set relay_direct_ip to false and point direct-IP traffic at the backend")
+				os.Exit(1)
+			}
+			// Worth stating plainly in the log: in this mode the backend is exposed to players
+			// directly, so it is the backend - not this process - that has to authenticate them.
+			// Nothing here can tell whether it does. Behind a relay each of these was safe to leave
+			// off, because the relay had checked the login already.
+			log.Info("no-relay mode: players will negotiate straight to the backend",
+				"address", normalized)
+			log.Warn("no-relay mode leaves player authentication to the backend - make sure it " +
+				"verifies Xbox Live logins itself. BDS: online-mode=true. Dragonfly: point " +
+				"nethernet_backend_address at a listener with authentication on, not the " +
+				"auth-disabled one the relay used. Geyser: validate-bedrock-login: true, and bind " +
+				"an address players can reach")
+		} else {
+			log.Info("relaying into backend over nethernet", "address", normalized)
+		}
 		// Warn rather than exit: the backend may simply not be up yet, and the relay is useful
 		// the moment it is. Each join re-dials anyway, so this recovers on its own.
 		probeCtx, cancelProbe := context.WithTimeout(ctx, 10*time.Second)
@@ -202,7 +225,7 @@ func main() {
 		}
 		cancelProbe()
 	default:
-		log.Error("unknown backend_transport in config.json - use \"raknet\" or \"nethernet\"",
+		log.Error("unknown backend_transport in config.json - use \"raknet\", \"nethernet\" or \"nethernet-norelay\"",
 			"value", cfg.BackendTransport)
 		os.Exit(1)
 	}
@@ -265,7 +288,12 @@ func runSession(ctx context.Context, authSession *session.Session, rta *xbl.RTA,
 		return sessionID, netherNetID, fmt.Errorf("obtain rta connection id: %w", err)
 	}
 
-	ln, netherNetID, pmsgID, err := bridge.Listen(ctx, authSession, netherNetID, log)
+	// Built once here and used for both bridge.Listen and ln.Serve: Listen needs it to decide
+	// whether each signaling transport gets a listener or a no-relay broker, and the two must not
+	// be able to disagree about the transport.
+	relayCfg := relayConfig(cfg, authSession, allowXUID, friendActivity, log)
+
+	ln, netherNetID, pmsgID, err := bridge.Listen(ctx, authSession, netherNetID, relayCfg, log)
 	if err != nil {
 		return sessionID, netherNetID, fmt.Errorf("start nethernet listener: %w", err)
 	}
@@ -467,7 +495,7 @@ func runSession(ctx context.Context, authSession *session.Session, rta *xbl.RTA,
 	// torn down and rebuilt when sessionCtx ends; a healthy in-progress WebRTC transport for a
 	// connected player has nothing to do with whether the signaling websocket that originally
 	// negotiated it is still open.
-	err = ln.Serve(sessionCtx, ctx, relayConfig(cfg, authSession, allowXUID, friendActivity, log))
+	err = ln.Serve(sessionCtx, ctx, relayCfg)
 	if errors.Is(context.Cause(sessionCtx), errTokenRenewal) {
 		return sessionID, netherNetID, errTokenRenewal
 	}
@@ -493,6 +521,7 @@ func relayConfig(cfg FileConfig, authSession *session.Session, allowXUID func(st
 		DisableClientEncryption: cfg.DisableClientEncryption,
 		AllowXUID:               allowXUID,
 		OnJoin:                  friendActivity.RecordJoin,
+		VerifyPlayerToken:       bridge.SessionTokenVerifier(authSession),
 		Log:                     log,
 	}
 }

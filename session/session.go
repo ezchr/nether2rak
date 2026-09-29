@@ -248,6 +248,24 @@ func (s *Session) MultiplayerToken(ctx context.Context, key *ecdsa.PublicKey) (j
 	return s.env.MultiplayerToken(ctx, &mcTokenSource{mcToken: mcToken}, key)
 }
 
+// VerifyMultiplayerToken checks that token is a multiplayer token genuinely issued by this
+// session's authorization service - signature against the service's published keys, issuer,
+// audience and expiry - and decodes its claims into v. It is the check a server makes on a
+// connecting player's token, done here so the relay can trust the XUID in one without a backend
+// having done it first. The signing keys are fetched once and cached by the environment, which
+// also serialises its own access, so like MultiplayerToken this does not take s.mu.
+func (s *Session) VerifyMultiplayerToken(ctx context.Context, token string, v any) error {
+	verifier, err := s.env.VerifierContext(ctx)
+	if err != nil {
+		return fmt.Errorf("obtain token verifier: %w", err)
+	}
+	idToken, err := verifier.Verify(ctx, token)
+	if err != nil {
+		return err
+	}
+	return idToken.Claims(v)
+}
+
 func (s *Session) Token() (*oauth2.Token, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
