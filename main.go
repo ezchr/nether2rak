@@ -300,7 +300,15 @@ func runSession(ctx context.Context, authSession *session.Session, rta *xbl.RTA,
 	log.Info("nethernet listeners ready", "netherNetID", netherNetID, "pmsgID", pmsgID)
 
 	// Player count shown on the Friends tab: fake_player_count, drifting inside
-	// fake_player_drift's range when that is set, never below 1 - see advertisedPlayers.
+	// fake_player_drift's range when that is set, or else the backend's real count - never
+	// below 1 - see advertisedPlayers.
+	realCount := advertisesRealPlayers(cfg)
+	if realCount {
+		// Read once now so the session is created with the real number rather than the floor.
+		if _, err := refreshRealPlayers(ctx, cfg); err != nil {
+			log.Warn("could not read the backend's player count; advertising 1 until it answers", "err", err)
+		}
+	}
 	worldInfo := func() xbl.Config {
 		return xbl.Config{
 			HostName:   cfg.HostName,
@@ -467,10 +475,43 @@ func runSession(ctx context.Context, authSession *session.Session, rta *xbl.RTA,
 	go func() {
 		ticker := time.NewTicker(time.Duration(cfg.UpdateIntervalSeconds) * time.Second)
 		defer ticker.Stop()
+		// The real player count is polled on its own, faster ticker and pushed only when it
+		// changes (see realPlayerPollInterval). A nil channel never fires, so with a fake count
+		// this case is inert. Both run in this one goroutine, so session updates never overlap.
+		var countTick <-chan time.Time
+		if realCount {
+			countTicker := time.NewTicker(realPlayerPollInterval)
+			defer countTicker.Stop()
+			countTick = countTicker.C
+		}
+		countFailing := false
 		for {
 			select {
 			case <-sessionCtx.Done():
 				return
+			case <-countTick:
+				changed, err := refreshRealPlayers(sessionCtx, cfg)
+				if err != nil {
+					// Log the first failure and the recovery, not every 15s in between.
+					if !countFailing {
+						log.Warn("could not read the backend's player count; keeping the last one", "err", err)
+					}
+					countFailing = true
+					continue
+				}
+				if countFailing {
+					log.Info("reading the backend's player count again", "players", realPlayers.Load())
+					countFailing = false
+				}
+				if !changed {
+					continue
+				}
+				log.Info("backend player count changed, updating the Friends tab",
+					"players", realPlayers.Load(), "advertised", advertisedPlayers(cfg))
+				xblSession.SetWorldInfo(worldInfo())
+				if err := xblSession.Update(sessionCtx); err != nil {
+					log.Error("failed to update session with the new player count", "err", err)
+				}
 			case <-ticker.C:
 				xblSession.SetWorldInfo(worldInfo()) // picks up fake_player_drift's next value
 				if err := xblSession.Update(sessionCtx); err != nil {

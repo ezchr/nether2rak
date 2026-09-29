@@ -50,8 +50,10 @@ type FileConfig struct {
 	WorldName  string `json:"world_name"`
 	MaxPlayers int    `json:"max_players"`
 
-	// FakePlayerCount, when above zero, is shown on the Friends tab instead of the
-	// real member count. Zero reports the session's own count honestly.
+	// FakePlayerCount, when above zero, is shown on the Friends tab instead of the real count.
+	// Zero (with no fake_player_drift) shows the backend's real player count - everyone on it,
+	// however they joined - read every 15s and pushed as soon as it changes, never below 1. See
+	// advertisedPlayers.
 	FakePlayerCount int `json:"fake_player_count"`
 
 	// FakePlayerDrift, when set with max above zero, makes the advertised count wander inside

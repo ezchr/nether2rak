@@ -7,11 +7,14 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/df-mc/go-nethernet"
 	"github.com/pion/webrtc/v4"
+	"github.com/sandertv/go-raknet"
 )
 
 // This file adds a second front door: players who type this machine's address into the Bedrock
@@ -233,6 +236,50 @@ func (p *serverListProvider) backendEntry(ctx context.Context) (*serverListEntry
 	if err != nil {
 		return nil, err
 	}
+	return fetchServerListEntry(ctx, address)
+}
+
+// BackendPlayers asks the backend how many players are on it right now: from its own
+// server-list JSON (GET /v1/join) for a NetherNet backend, or from its RakNet ping reply for a
+// RakNet one. Both are what a Bedrock client's server list would show, so the count covers
+// everyone on the backend however they joined - Friends tab, direct IP or anything else.
+func BackendPlayers(ctx context.Context, cfg Config) (int, error) {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	if BackendSpeaksNetherNet(cfg) {
+		address, err := NormalizeNetherNetAddress(cfg.NetherNetBackendAddress)
+		if err != nil {
+			return 0, err
+		}
+		entry, err := fetchServerListEntry(ctx, address)
+		if err != nil {
+			return 0, err
+		}
+		return entry.Players, nil
+	}
+	pong, err := raknet.PingContext(ctx, cfg.GeyserAddress)
+	if err != nil {
+		return 0, fmt.Errorf("ping raknet backend %s: %w", cfg.GeyserAddress, err)
+	}
+	return parsePongPlayers(pong)
+}
+
+// parsePongPlayers reads the online count from a Bedrock RakNet ping reply,
+// "MCPE;<motd>;<protocol>;<version>;<players>;<max players>;...".
+func parsePongPlayers(pong []byte) (int, error) {
+	fields := strings.Split(string(pong), ";")
+	if len(fields) < 6 {
+		return 0, fmt.Errorf("unexpected ping reply %q", pong)
+	}
+	players, err := strconv.Atoi(fields[4])
+	if err != nil {
+		return 0, fmt.Errorf("ping reply player count %q: %w", fields[4], err)
+	}
+	return players, nil
+}
+
+// fetchServerListEntry reads a NetherNet server's server-list JSON from its base address.
+func fetchServerListEntry(ctx context.Context, address string) (*serverListEntry, error) {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 
