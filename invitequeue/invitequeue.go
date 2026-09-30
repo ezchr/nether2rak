@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -19,6 +20,13 @@ import (
 // months ago and have no realistic chance of still caring about an invite - without this,
 // nothing ever removes an entry once written.
 const Expiry = 30 * 24 * time.Hour
+
+// acceptedXUIDs reads AcceptedFile beside queuePath: players who joined after being invited
+// (see accepted.go). They are kept in the queue past Expiry - an invite has already worked on
+// them once, so they are the last people worth dropping.
+func acceptedXUIDs(queuePath string) map[string]bool {
+	return firstFields(filepath.Join(filepath.Dir(queuePath), AcceptedFile))
+}
 
 // Prune reads path, drops any line older than Expiry, and rewrites the file with what remains.
 // Safe to call whether or not the file exists (a missing file is treated as already-empty, not
@@ -40,8 +48,9 @@ func Prune(path string, log *slog.Logger) {
 	}
 
 	now := time.Now()
+	joined := acceptedXUIDs(path)
 	var kept []string
-	expiredCount := 0
+	expiredCount, protectedCount := 0, 0
 
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
@@ -54,8 +63,12 @@ func Prune(path string, log *slog.Logger) {
 			continue
 		}
 		if now.Sub(discoveredAt) >= Expiry {
-			expiredCount++
-			continue
+			if joined[xuid] {
+				protectedCount++
+			} else {
+				expiredCount++
+				continue
+			}
 		}
 		kept = append(kept, line)
 	}
@@ -65,6 +78,9 @@ func Prune(path string, log *slog.Logger) {
 		return
 	}
 
+	if protectedCount > 0 {
+		log.Info("kept expired invite queue entries for players who accepted an invite", "count", protectedCount)
+	}
 	if expiredCount == 0 {
 		return
 	}

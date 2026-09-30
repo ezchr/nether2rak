@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -23,6 +24,7 @@ import (
 
 	"github.com/df-mc/go-nethernet"
 	"github.com/gameparrot/netherconnect/bridge"
+	"github.com/gameparrot/netherconnect/invitequeue"
 	"github.com/gameparrot/netherconnect/proxy"
 	"github.com/gameparrot/netherconnect/session"
 	"github.com/gameparrot/netherconnect/xbl"
@@ -93,7 +95,10 @@ func main() {
 				file = nextTokenFile(".")
 				fmt.Printf("No filename given - using %s (the next unused tokenN.json).\n", file)
 			}
-			runLoginBroadcast(file, debug, log)
+			// -no-friend-accept, anywhere on the line: this account leaves friend requests to its
+			// owner instead of auto-accepting them (see FileConfig.NoFriendAccept).
+			noFriendAccept := slices.Contains(args, "-no-friend-accept") || slices.Contains(args, "--no-friend-accept")
+			runLoginBroadcast(file, debug, noFriendAccept, log)
 			return
 		}
 	}
@@ -461,10 +466,13 @@ func runSession(ctx context.Context, authSession *session.Session, rta *xbl.RTA,
 	// Only when this broadcast has an invite_port of its own - extra broadcasts default to 0
 	// (off), since two broadcasts can't share one control port.
 	if cfg.InvitePort > 0 {
-		inviteCtl := newInviteController(xblSession, log)
+		inviteCtl := newInviteController(xblSession, cfg.InvitePort, log)
 		friendsInviteCtl := newFriendsInviteController(authSession, xblSession, log)
 		adder := friendAdderFor(cfg.InvitePort, authSession, xuid, log)
 		startInviteControlServer(sessionCtx, ctx, fmt.Sprintf("127.0.0.1:%d", cfg.InvitePort), inviteCtl, friendsInviteCtl, adder, log)
+		// If invites were running when the previous session (or relay process) ended, carry on
+		// with them on this one - see inviteStateFileFmt.
+		inviteCtl.ResumeIfWanted(sessionCtx)
 	}
 
 	if debug {
@@ -561,9 +569,12 @@ func relayConfig(cfg FileConfig, authSession *session.Session, allowXUID func(st
 		FixNativeBDSPersistence: cfg.FixNativeBDSPersistence,
 		DisableClientEncryption: cfg.DisableClientEncryption,
 		AllowXUID:               allowXUID,
-		OnJoin:                  friendActivity.RecordJoin,
-		VerifyPlayerToken:       bridge.SessionTokenVerifier(authSession),
-		Log:                     log,
+		OnJoin: func(xuid, name string) {
+			friendActivity.RecordJoin(xuid, name)
+			invitequeue.RecordAcceptIfInvited(xuid, name, log)
+		},
+		VerifyPlayerToken: bridge.SessionTokenVerifier(authSession),
+		Log:               log,
 	}
 }
 

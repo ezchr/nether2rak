@@ -90,6 +90,7 @@ func (s *Store) unlock() { s.mu <- struct{}{} }
 func (s *Store) RecordJoin(xuid, displayName string) {
 	s.lock()
 	defer s.unlock()
+	s.mergeFromFileLocked()
 	s.records[xuid] = Record{XUID: xuid, DisplayName: sanitizeDisplayName(displayName), LastJoin: time.Now()}
 	if err := s.writeLocked(); err != nil {
 		s.log.Error("failed to persist friend activity", "xuid", xuid, "err", err)
@@ -128,12 +129,37 @@ func (s *Store) Stale(window time.Duration) []Record {
 func (s *Store) Forget(xuid string) {
 	s.lock()
 	defer s.unlock()
+	s.mergeFromFileLocked()
 	if _, ok := s.records[xuid]; !ok {
 		return
 	}
 	delete(s.records, xuid)
 	if err := s.writeLocked(); err != nil {
 		s.log.Error("failed to persist friend activity after removal", "xuid", xuid, "err", err)
+	}
+}
+
+// mergeFromFileLocked folds in records another process wrote to the same file since this store
+// last read it, keeping whichever LastJoin is newer. Two relay processes (one per host account)
+// share friend_activity.txt and each rewrites the whole file from its own map: without this merge
+// every write erased the other process's joins (96 players lost 2026-09-30). Caller must hold the
+// lock. A Forget in one process can still be undone by the other if it had the record in memory;
+// removals are manual and rare, joins are constant, so joins are what this protects.
+func (s *Store) mergeFromFileLocked() {
+	f, err := os.Open(s.path)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		rec, ok := parseLine(scanner.Text())
+		if !ok {
+			continue
+		}
+		if cur, have := s.records[rec.XUID]; !have || rec.LastJoin.After(cur.LastJoin) {
+			s.records[rec.XUID] = rec
+		}
 	}
 }
 

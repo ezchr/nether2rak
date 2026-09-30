@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -49,6 +50,21 @@ import (
 // token.json) so nothing needs to be running on both ends at the same instant.
 const inviteQueueFile = "invite_queue.txt"
 
+// Invite lists /invites/start?list= can pick. "queue" is the scraper's discovered players (the
+// default); "accepted" is everyone who joined after being invited - see invitequeue.AcceptedFile.
+const (
+	inviteListQueue    = "queue"
+	inviteListAccepted = "accepted"
+)
+
+// inviteListFile maps a list name to the file it reads. Anything unrecognised is the queue.
+func inviteListFile(list string) string {
+	if list == inviteListAccepted {
+		return invitequeue.AcceptedFile
+	}
+	return inviteQueueFile
+}
+
 // inviteRateLimit bounds how often a single invite is actually sent to Xbox Live, i.e. the
 // minimum gap between any two invites within one lap (and, since a lap loops straight back to
 // the top with no pause - see run's own comment - the minimum gap between two invites to the
@@ -58,7 +74,29 @@ const inviteQueueFile = "invite_queue.txt"
 // notification's count rather than showing anything new - and sending that fast, indefinitely,
 // risks reading as an abuse pattern to Xbox Live over a long-running loop, independent of
 // whether the recipient ever notices the difference.
+//
+// It is the default only: /invites/start?interval=<duration> picks another for that run (see
+// parseInviteInterval), at the operator's discretion - the reasons above still apply.
 const inviteRateLimit = 10 * time.Second
+
+// minInviteInterval is the fastest /invites/start?interval= accepts.
+const minInviteInterval = time.Second
+
+// parseInviteInterval reads /invites/start's optional interval (a Go duration such as "1s" or
+// "5s"); empty means inviteRateLimit.
+func parseInviteInterval(s string) (time.Duration, error) {
+	if s == "" {
+		return inviteRateLimit, nil
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return 0, fmt.Errorf("interval %q: %w", s, err)
+	}
+	if d < minInviteInterval {
+		return 0, fmt.Errorf("interval %s is below the minimum of %s", d, minInviteInterval)
+	}
+	return d, nil
+}
 
 // inviteController owns the running/stopped state of the invite loop and the HTTP endpoint used
 // to flip it. There is exactly one of these per process (one xblSession, one world to invite
@@ -69,6 +107,16 @@ type inviteController struct {
 
 	mu      sync.Mutex
 	running bool
+	// interval is the gap between invites for the current run, set by Start.
+	interval time.Duration
+	// list is which invite list the current run cycles through, set by Start.
+	list string
+
+	// statePath holds this invite port's inviteState, so the loop survives the session it runs
+	// on. stateMu serialises writes to it: the loop records progress after every invite while
+	// Stop records that it was stopped, and Stop's write must be the one that lands.
+	statePath string
+	stateMu   sync.Mutex
 	// stop, non-nil only while running, cancels the current invite loop without touching
 	// sessionCtx - "stop" must not tear down the whole session, only this one feature.
 	stop context.CancelFunc
@@ -76,7 +124,7 @@ type inviteController struct {
 
 // newInviteController constructs a controller in the stopped state - see this file's package doc
 // for why starting stopped is load-bearing, not just a default.
-func newInviteController(xblSession *xbl.Session, log *slog.Logger) *inviteController {
+func newInviteController(xblSession *xbl.Session, invitePort int, log *slog.Logger) *inviteController {
 	l := log.With("src", "invite-watcher")
 	// Prune once here, at construction, rather than only as part of the invite loop's own read
 	// path - the loop only runs between "start" and "stop" (off by default, see this file's
@@ -85,23 +133,135 @@ func newInviteController(xblSession *xbl.Session, log *slog.Logger) *inviteContr
 	// independent of whether the loop is ever started - see cmd/scraper's own startup prune
 	// for the other half of "independent of either process's uptime".
 	invitequeue.Prune(inviteQueueFile, l)
-	return &inviteController{xblSession: xblSession, log: l}
+	return &inviteController{xblSession: xblSession, log: l, statePath: fmt.Sprintf(inviteStateFileFmt, invitePort)}
+}
+
+// inviteStateFileFmt names the file, one per invite port, that carries the invite loop across
+// session generations.
+//
+// The loop is tied to its session: a rebuild (the MC token renewal every ~4h, a signaling or RTA
+// drop) or a relay restart ends it, since every invite has to point at the session that is live
+// now, not one that no longer exists. Without a record of it the loop simply stopped there, and a
+// manual start began again from the top of the queue - over a long queue that meant the same
+// first few thousand players, again and again, and never the rest. With it, each new session
+// picks the loop up where the last one left off, inviting into itself.
+const inviteStateFileFmt = ".invite_state_%d.json"
+
+// inviteState is what inviteStateFileFmt holds.
+type inviteState struct {
+	// Running is whether invites should be going out: set by Start, cleared only by Stop - a
+	// session ending does not clear it, which is what makes the next session resume.
+	Running  bool   `json:"running"`
+	Interval string `json:"interval,omitempty"`
+	// Last is the XUID invited most recently in the current lap, so the next run continues after
+	// it. Empty: the next lap starts at the top of the queue.
+	Last string `json:"last,omitempty"`
+	// List is the invite list the loop runs on; empty means the queue.
+	List string `json:"list,omitempty"`
+}
+
+func (c *inviteController) loadState() inviteState {
+	var st inviteState
+	b, err := os.ReadFile(c.statePath)
+	if err == nil {
+		err = json.Unmarshal(b, &st)
+	}
+	if err != nil && !os.IsNotExist(err) {
+		c.log.Warn("could not read invite state; starting from a clean state", "path", c.statePath, "err", err)
+	}
+	return st
+}
+
+// saveStateLocked writes st atomically. Called with c.stateMu held.
+func (c *inviteController) saveStateLocked(st inviteState) {
+	b, err := json.Marshal(st)
+	if err == nil {
+		tmp := c.statePath + ".tmp"
+		if err = os.WriteFile(tmp, b, 0o644); err == nil {
+			err = os.Rename(tmp, c.statePath)
+		}
+	}
+	if err != nil {
+		c.log.Warn("could not save invite state", "path", c.statePath, "err", err)
+	}
+}
+
+// recordProgress notes the XUID just invited ("" at the end of a lap). It writes nothing once ctx
+// is done: a Stop that cancelled the loop while an invite was in flight must not have its
+// "stopped" overwritten by the loop's last "running".
+func (c *inviteController) recordProgress(ctx context.Context, interval time.Duration, list, last string) {
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+	if ctx.Err() != nil {
+		return
+	}
+	c.saveStateLocked(inviteState{Running: true, Interval: interval.String(), Last: last, List: list})
+}
+
+// ResumeIfWanted restarts the loop on this session if it was running when the previous session
+// (or the previous relay process) ended, continuing after the last player it invited.
+func (c *inviteController) ResumeIfWanted(ctx context.Context) {
+	st := c.loadState()
+	if !st.Running {
+		return
+	}
+	interval, err := parseInviteInterval(st.Interval)
+	if err != nil {
+		interval = inviteRateLimit
+	}
+	c.log.Info("resuming invites on this session", "interval", interval, "after", st.Last)
+	c.Start(ctx, interval, false)
+}
+
+// resumeIndex is where a lap resumes in xuids: just after last, or at the top when last is empty
+// or no longer in the queue.
+func resumeIndex(xuids []string, last string) int {
+	if last == "" {
+		return 0
+	}
+	for i, x := range xuids {
+		if x == last {
+			return i + 1
+		}
+	}
+	return 0
 }
 
 // Start begins the repeating invite-lap loop if it is not already running. parentCtx bounds the
 // loop's maximum lifetime (tie it to sessionCtx so a session rebuild stops this too); Stop (or a
 // second Start) can end it earlier. Safe to call when already running - it is then a no-op.
-func (c *inviteController) Start(parentCtx context.Context) {
+// interval is the gap between two invites for this run; an already running loop keeps its own.
+// The loop continues after the last player invited in the current lap unless fromTop is set.
+func (c *inviteController) Start(parentCtx context.Context, interval time.Duration, fromTop bool) {
+	c.StartList(parentCtx, interval, c.loadState().List, fromTop)
+}
+
+// StartList is Start on a chosen invite list (inviteListQueue or inviteListAccepted). Switching
+// lists always starts the new one from its top: the saved position belongs to the old list.
+func (c *inviteController) StartList(parentCtx context.Context, interval time.Duration, list string, fromTop bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.running {
 		return
 	}
+	if list != inviteListAccepted {
+		list = inviteListQueue
+	}
+	last := ""
+	if st := c.loadState(); !fromTop && (st.List == list || (st.List == "" && list == inviteListQueue)) {
+		last = st.Last
+	}
+	c.stateMu.Lock()
+	c.saveStateLocked(inviteState{Running: true, Interval: interval.String(), Last: last, List: list})
+	c.stateMu.Unlock()
+
 	loopCtx, cancel := context.WithCancel(parentCtx)
 	c.stop = cancel
 	c.running = true
-	c.log.Info("invite loop started")
-	go c.run(loopCtx)
+	c.interval = interval
+	c.list = list
+	c.log.Info("invite loop started", "interval", interval, "list", list, "after", last)
+	go c.run(loopCtx, interval, list, last)
 }
 
 // Stop ends the invite loop if running. Safe to call when already stopped.
@@ -114,46 +274,74 @@ func (c *inviteController) Stop() {
 	c.stop()
 	c.stop = nil
 	c.running = false
+	// After cancelling: the loop checks its context under stateMu before recording progress, so
+	// this write is the last one. The position is kept, so the next start resumes there.
+	c.stateMu.Lock()
+	st := c.loadState()
+	st.Running = false
+	c.saveStateLocked(st)
+	c.stateMu.Unlock()
 	c.log.Info("invite loop stopped")
 }
 
-// Running reports whether the loop is currently active.
-func (c *inviteController) Running() bool {
+// Running reports whether the loop is currently active, and at what interval.
+func (c *inviteController) Running() (bool, time.Duration) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.running
+	return c.running, c.interval
+}
+
+// List reports which invite list the current (or last) run uses.
+func (c *inviteController) List() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.list == "" {
+		return inviteListQueue
+	}
+	return c.list
 }
 
 // run is the actual repeating lap loop, started by Start in its own goroutine. Exits as soon as
 // ctx is cancelled, whether by Stop or by the parent session ending.
-func (c *inviteController) run(ctx context.Context) {
+//
+// resumeAfter is the XUID the previous run stopped after: the first lap continues from just past
+// it (see resumeIndex), and every lap after that starts at the top.
+func (c *inviteController) run(ctx context.Context, interval time.Duration, list, resumeAfter string) {
+	path := inviteListFile(list)
 	for {
-		xuids := readXUIDList(inviteQueueFile, c.log)
+		xuids := readXUIDList(path, c.log)
 		if len(xuids) == 0 {
-			c.log.Debug("invite queue empty, waiting", "path", inviteQueueFile)
+			c.log.Debug("invite list empty, waiting", "path", path)
 		} else {
-			c.log.Info("starting invite lap", "count", len(xuids))
-			for _, xuid := range xuids {
+			from := resumeIndex(xuids, resumeAfter)
+			if resumeAfter != "" && from == 0 {
+				c.log.Info("the last player invited is no longer in the queue; starting from the top", "last", resumeAfter)
+			}
+			resumeAfter = ""
+			c.log.Info("starting invite lap", "list", list, "count", len(xuids), "from", from)
+			for _, xuid := range xuids[from:] {
 				select {
 				case <-ctx.Done():
 					return
-				case <-time.After(inviteRateLimit):
+				case <-time.After(interval):
 				}
 				// Checked fresh right before each send, not once per lap - a rate-limited lap
 				// over a long list can take a while, and someone can join partway through it.
 				// Anyone already in our world gets a pointless invite otherwise.
 				if bridge.ConnectedXUIDs()[xuid] {
 					c.log.Debug("skipping invite - already connected", "xuid", xuid)
-					continue
-				}
-				if err := c.xblSession.SendInvite(ctx, xuid); err != nil {
+				} else if err := c.xblSession.SendInvite(ctx, xuid); err != nil {
 					c.log.Error("failed to send invite", "xuid", xuid, "err", err)
+				} else {
+					invitequeue.RecordSent(xuid)
 					// Keep going with the rest of the lap rather than aborting the whole cycle
 					// over one failed invite (a stale/invalid XUID, a momentary API hiccup) -
 					// this same XUID gets tried again on the next lap regardless.
 				}
+				c.recordProgress(ctx, interval, list, xuid)
 			}
-			c.log.Info("invite lap complete", "count", len(xuids))
+			c.log.Info("invite lap complete", "list", list, "count", len(xuids))
+			c.recordProgress(ctx, interval, list, "")
 			continue
 		}
 
@@ -186,16 +374,43 @@ func startInviteControlServer(ctx, adderCtx context.Context, addr string, c *inv
 		// loop to ctx means a session rebuild cancels any in-flight loop along with the HTTP
 		// server, so there is never more than one live goroutine and start/stop/status on the
 		// currently-listening server always reflect the actual running state.
-		c.Start(ctx)
-		fmt.Fprintln(w, "started")
+		interval, err := parseInviteInterval(r.URL.Query().Get("interval"))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		// ?restart=1 begins the lap again from the top; otherwise it continues after the last
+		// player invited, as a session rebuild would.
+		fromTop := r.URL.Query().Get("restart") != ""
+		// ?list=accepted invites everyone who joined after an invite (invite_accepted.txt) instead
+		// of the scraper's queue; omitted keeps whichever list the last run used.
+		list := r.URL.Query().Get("list")
+		if list != "" && list != inviteListQueue && list != inviteListAccepted {
+			http.Error(w, "list must be \"queue\" or \"accepted\"", http.StatusBadRequest)
+			return
+		}
+		if running, current := c.Running(); running {
+			fmt.Fprintf(w, "already running on the %s list, one invite every %s (stop it first to change)\n", c.List(), current)
+			return
+		}
+		if list == "" {
+			c.Start(ctx, interval, fromTop)
+		} else {
+			c.StartList(ctx, interval, list, fromTop)
+		}
+		where := "from the top"
+		if last := c.loadState().Last; last != "" {
+			where = "after " + last
+		}
+		fmt.Fprintf(w, "started on the %s list, one invite every %s, %s\n", c.List(), interval, where)
 	})
 	mux.HandleFunc("/invites/stop", func(w http.ResponseWriter, r *http.Request) {
 		c.Stop()
 		fmt.Fprintln(w, "stopped")
 	})
 	mux.HandleFunc("/invites/status", func(w http.ResponseWriter, r *http.Request) {
-		if c.Running() {
-			fmt.Fprintln(w, "running")
+		if running, interval := c.Running(); running {
+			fmt.Fprintf(w, "running on the %s list, one invite every %s, last invited %s\n", c.List(), interval, c.loadState().Last)
 		} else {
 			fmt.Fprintln(w, "stopped")
 		}

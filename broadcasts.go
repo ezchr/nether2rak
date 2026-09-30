@@ -93,6 +93,7 @@ func resolveBroadcasts(cfg FileConfig) (out []BroadcastConfig, problems []string
 // own Friends-tab names and invite port.
 func (b BroadcastConfig) forBroadcast(cfg FileConfig) FileConfig {
 	cfg.HostName, cfg.WorldName, cfg.InvitePort = b.HostName, b.WorldName, b.InvitePort
+	cfg.NoFriendAccept = b.NoFriendAccept
 	cfg.ExtraBroadcasts = nil
 	return cfg
 }
@@ -185,13 +186,18 @@ func runBroadcast(ctx context.Context, name string, authSession *session.Session
 	// silently quiet indefinitely after some reconnects - see FriendManager.Run's own doc comment
 	// for the real incident that motivated this (three pending requests found sitting unprocessed
 	// with zero related log output).
-	friends := xbl.NewFriendManager(authSession, log)
-	go friends.Run(ctx)
-	rta.OnFriendRequest = func() {
-		select {
-		case friends.Trigger <- struct{}{}:
-		default:
-			// Already a trigger pending; Run will pick it up on its next iteration regardless.
+	if cfg.NoFriendAccept {
+		// The account's owner manages its friends list; requests are left for them to answer.
+		log.Info("not auto-accepting friend requests for this account (no_friend_accept)")
+	} else {
+		friends := xbl.NewFriendManager(authSession, log)
+		go friends.Run(ctx)
+		rta.OnFriendRequest = func() {
+			select {
+			case friends.Trigger <- struct{}{}:
+			default:
+				// Already a trigger pending; Run will pick it up on its next iteration regardless.
+			}
 		}
 	}
 
@@ -307,7 +313,10 @@ func nextTokenFile(dir string) string {
 // nether2rak-unified process (this one, or another -login run) - Xbox Live itself is the
 // backstop for that: creating a second session for an account already hosting one is expected
 // to fail or evict the first, not run both cleanly. Use a different account per broadcast.
-func runLoginBroadcast(file string, debug bool, log *slog.Logger) {
+//
+// noFriendAccept is the -no-friend-accept flag: this account does not auto-accept friend
+// requests (see FileConfig.NoFriendAccept).
+func runLoginBroadcast(file string, debug, noFriendAccept bool, log *slog.Logger) {
 	cfg, err := loadConfig("config.json")
 	if err != nil {
 		log.Error("failed to load config.json", "err", err)
@@ -328,7 +337,10 @@ func runLoginBroadcast(file string, debug bool, log *slog.Logger) {
 	}
 
 	name := strings.TrimSuffix(strings.TrimSuffix(file, ".json"), "-token")
-	b := BroadcastConfig{Name: name, TokenFile: file}.forBroadcast(cfg)
+	// The world and host names default to config.json's own, as they do for extra_broadcasts
+	// entries (see resolveBroadcasts) - without this a -login broadcast showed blank ones.
+	b := BroadcastConfig{Name: name, TokenFile: file, HostName: cfg.HostName, WorldName: cfg.WorldName,
+		NoFriendAccept: noFriendAccept}.forBroadcast(cfg)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

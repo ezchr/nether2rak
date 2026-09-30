@@ -142,6 +142,12 @@ type FileConfig struct {
 	// multi-instance caveat as PingPort: give each concurrently-run instance its own port.
 	InvitePort int `json:"invite_port"`
 
+	// NoFriendAccept stops this account auto-accepting incoming Xbox Live friend requests. By
+	// default every broadcasting account accepts them, since a friend is who can see the world;
+	// set it for an account that is also somebody's own, whose friends list they want to manage
+	// themselves. Applies to the primary broadcast; each extra broadcast has its own.
+	NoFriendAccept bool `json:"no_friend_accept"`
+
 	// PingPort is the loopback port the real-latency ping API (for the Folia-side
 	// PingDisplay plugin) listens on. Only needs to change from the default if running
 	// more than one nether2rak instance on the same machine (e.g. two accounts
@@ -177,6 +183,9 @@ type BroadcastConfig struct {
 	// loopback port (see invitewatcher.go). Default 0: off - the primary's invite_port can't be
 	// shared, and every broadcast's control server needs a port of its own.
 	InvitePort int `json:"invite_port"`
+	// NoFriendAccept: as FileConfig.NoFriendAccept, for this broadcast's account. Not inherited
+	// from the primary - each account's friends list is its own.
+	NoFriendAccept bool `json:"no_friend_accept"`
 }
 
 func defaultConfig() FileConfig {

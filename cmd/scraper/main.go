@@ -50,6 +50,7 @@ import (
 
 	"github.com/gameparrot/netherconnect/session"
 	"github.com/gameparrot/netherconnect/xbl"
+	"github.com/google/uuid"
 	"github.com/sandertv/gophertunnel/minecraft"
 	"github.com/sandertv/gophertunnel/minecraft/auth"
 	"github.com/sandertv/gophertunnel/minecraft/protocol"
@@ -81,14 +82,16 @@ const defaultReconnectDelay = 10 * time.Second
 func main() {
 	friendTarget := flag.String("friend", "", "Gamertag or XUID of a friend to scrape from their currently open Friends-tab world, instead of a direct-IP target")
 	reconnectDelay := flag.Duration("reconnect-delay", defaultReconnectDelay, "How long to wait between reconnect attempts after a dropped or failed connection")
+	experienceID := flag.String("experience", "", "Featured-server experience id (from a minecraft://joinExperience?experienceId=... link) to scrape: the account asks to be placed in it before every connection, as the game does")
+	noFriendAccept := flag.Bool("no-friend-accept", false, "Do not auto-accept incoming friend requests on this account (for an account whose friends list its owner manages)")
 	flag.Parse()
 
 	var address string
-	if *friendTarget == "" && flag.NArg() > 0 {
+	if *friendTarget == "" && *experienceID == "" && flag.NArg() > 0 {
 		address = flag.Arg(0)
 	}
 	// No target at all means friends'-worlds mode: every friend's open world, in turn.
-	friendWorldsMode := *friendTarget == "" && address == ""
+	friendWorldsMode := *friendTarget == "" && address == "" && *experienceID == ""
 
 	log := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
@@ -112,7 +115,7 @@ func main() {
 	var authSession *session.Session
 	var selfXUID string
 	friendXUID := *friendTarget
-	if *friendTarget != "" || friendWorldsMode {
+	if *friendTarget != "" || friendWorldsMode || *experienceID != "" {
 		authSession, err = session.SessionFromTokenSource(tokSrc, auth.AndroidConfig, context.Background())
 		if err != nil {
 			log.Error("failed to establish xbox live session for friend lookup", "err", err)
@@ -191,7 +194,10 @@ func main() {
 	// account, reused here with polling instead of RTA (an RTA connection is real additional
 	// setup this scraper has no other use for; CheckPending is a plain, idempotent GET that
 	// costs nothing extra to call on a timer with nothing pending).
-	if authSession != nil {
+	if authSession != nil && *noFriendAccept {
+		log.Info("not auto-accepting friend requests for this account (-no-friend-accept)")
+	}
+	if authSession != nil && !*noFriendAccept {
 		friendMgr := xbl.NewFriendManager(authSession, log)
 		go friendMgr.Run(ctx)
 		go func() {
@@ -227,6 +233,20 @@ func main() {
 		var runErr error
 		if friendXUID != "" {
 			runErr = scrapeFriendOnce(ctx, tokSrc, authSession, selfXUID, friendXUID, *friendTarget, seen, out, log)
+		} else if *experienceID != "" {
+			addr, err := experienceAddress(ctx, authSession, *experienceID)
+			if err != nil {
+				runErr = err
+			} else {
+				log.Info("placed in experience", "experience", *experienceID, "address", addr)
+				runErr = scrapeOnce(ctx, addr, tokSrc, seen, out, log)
+			}
+			if exemptMissingPack(runErr) {
+				// A marketplace pack the server assumes every client owns: exempt it and go
+				// straight back in, without the reconnect delay.
+				log.Info("skipping a pack the server assumes clients own; rejoining", "err", runErr)
+				continue
+			}
 		} else {
 			runErr = scrapeOnce(ctx, address, tokSrc, seen, out, log)
 		}
@@ -251,6 +271,11 @@ func scrapeOnce(ctx context.Context, address string, tokSrc oauth2.TokenSource, 
 	dialer := minecraft.Dialer{
 		TokenSource: tokSrc,
 		ErrorLog:    log,
+		// Only the player list is read, so no pack is ever needed - and featured servers' packs
+		// are slow and can fail to download (seen 2026-09-30 on OneBlock: a size mismatch after
+		// ~35s, then "texture pack ... not downloaded"). Declining every pack, as scraper_friend.go
+		// already does, makes gophertunnel skip them all.
+		DownloadResourcePack: func(uuid.UUID, string, int, int) bool { return false },
 	}
 	conn, err := dialer.DialContext(dialCtx, "raknet", address)
 	if err != nil {
