@@ -33,16 +33,27 @@ nether2rak doesn't run a world itself; it only relays players into one that's al
    If it still can't fetch something over the network, try `GOPROXY=direct go build .`.
 
 **3. Edit `config.json`** to match your backend config:
-   - `geyser_address` → the address/port your backend is listening on.
+   - `backend_transport` → `"raknet"` for a RakNet server such as Geyser (the default), or
+     `"nethernet-norelay"` for a BDS / Dragonfly that speaks NetherNet itself (players then
+     connect straight to it).
+   - `server_address` → the `host:port` your server is listening on - its RakNet port for
+     `raknet`, or its `server-port` for the NetherNet modes. (Older configs that use
+     `geyser_address` / `nethernet_backend_address` still work.)
    - `protocol` / `version` → must exactly match your backend's Bedrock protocol number and
      version string, or Bedrock clients get an "outdated" error and can't join.
    - `host_name` / `world_name` → what shows up on the Friends tab.
    - `max_players` → just cosmetic, shown on the Friends tab; doesn't actually limit who can
      connect.
    - `fake_player_count` → controls what player count is shown on the Friends tab. Leave at
-     `0` to show the real, live number of players currently connected through nether2rak
-     (updated every `update_interval_seconds`). Set it above `0` to always show that fixed
-     number instead, regardless of how many players are actually connected.
+     `0` to show the real number of players on your server (read from it every 15 seconds,
+     however they joined). Set it above `0` to always show that fixed number instead.
+   - `control_port` → a local-only port (`127.0.0.1`, default `7777`) for controlling the
+     relay: `/ping` (player latency), `/invites/...` (see INVITE_FEATURE.md) and, with
+     `-debug`, `/debug/pprof/...`. Give each relay on one machine its own. (Older configs with
+     `ping_port` / `invite_port` / `pprof_port` still work.)
+
+   On start the relay logs a `config:` line for every setting that is renamed or that does
+   nothing in the mode you chose, so leftovers from another setup are easy to spot.
 
    (Leave `config.go` alone - it is a fallback config)
 

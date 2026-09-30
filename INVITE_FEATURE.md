@@ -59,14 +59,17 @@ HTTP call (same trust model as the existing ping API in `bridge/pingserver.go` -
 off the VPS):
 
 ```
-curl http://127.0.0.1:<invite_port>/invites/start
-curl http://127.0.0.1:<invite_port>/invites/stop
-curl http://127.0.0.1:<invite_port>/invites/status
+curl http://127.0.0.1:<control_port>/invites/start
+curl http://127.0.0.1:<control_port>/invites/stop
+curl http://127.0.0.1:<control_port>/invites/status
 ```
 
-`invite_port` is set per run directory in `config.json` (`"invite_port"`) - currently `7782` for
-`run/geyser-nethernet`, `7783` for `run/dragonfly`, `7784` for `run/bds-nethernet`, so
-multiple instances don't collide.
+`control_port` is set per run directory in `config.json` (`"control_port"`, default `7777`) -
+the relay's one local-only port, which also serves the ping API and pprof (see `control.go`).
+Give each relay on one machine its own. An extra broadcast with `"invites": true` gets the same
+controls under `http://127.0.0.1:<control_port>/broadcast/<name>/invites/...`. (Before
+`control_port` these had a port of their own, `invite_port`; a config that still sets it keeps
+working.)
 
 Once started, it repeats indefinitely until stopped: send an invite to everyone currently in the
 queue file, one lap, then immediately start the next lap (no pause between laps), continuing
@@ -89,9 +92,9 @@ queue-based inviter above. Reads the host account's own real Xbox Live friends l
 this account's existing friends.
 
 ```
-curl http://127.0.0.1:<invite_port>/invites/friends/start
-curl http://127.0.0.1:<invite_port>/invites/friends/stop
-curl http://127.0.0.1:<invite_port>/invites/friends/status
+curl http://127.0.0.1:<control_port>/invites/friends/start
+curl http://127.0.0.1:<control_port>/invites/friends/stop
+curl http://127.0.0.1:<control_port>/invites/friends/status
 ```
 
 Same port as the queue-based inviter, different path prefix - both share one HTTP control server.
@@ -154,6 +157,9 @@ All in `/root/mcjava/n2r-unified/nether2rak/`, the one shared source tree/binary
 - **`cmd/scraper/main.go`** - the standalone scraper binary described above.
 
 ### Changed files
+
+(As first built. The invite controls have since moved from their own `invite_port` server to the
+shared `control_port` - see `control.go` and `inviteRoutes` in `invitewatcher.go`.)
 
 - **`main.go`** - `runSession` now constructs an `inviteController` right after
   `xblSession.Create()` succeeds and starts `startInviteControlServer` on it

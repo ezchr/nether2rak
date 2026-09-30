@@ -25,10 +25,10 @@ import (
 //
 // OFF BY DEFAULT, controlled over the same loopback control port as the inviters:
 //
-//	curl 'http://127.0.0.1:<InvitePort>/friends/add/start?from=play.example.net:19132'
-//	curl 'http://127.0.0.1:<InvitePort>/friends/add/start?from=<host gamertag or world name>'
-//	curl http://127.0.0.1:<InvitePort>/friends/add/stop
-//	curl http://127.0.0.1:<InvitePort>/friends/add/status
+//	curl 'http://127.0.0.1:<control_port>/friends/add/start?from=play.example.net:19132'
+//	curl 'http://127.0.0.1:<control_port>/friends/add/start?from=<host gamertag or world name>'
+//	curl http://127.0.0.1:<control_port>/friends/add/stop
+//	curl http://127.0.0.1:<control_port>/friends/add/status
 //
 // Unlike the inviters, one adder lives for the whole process rather than one session generation:
 // a run at one request per second can take hours, and session rebuilds happen several times a
@@ -59,11 +59,11 @@ type friendAdder struct {
 	total   int
 }
 
-// friendAdders holds one adder per broadcast, keyed by its invite port (unique per broadcast).
+// friendAdders holds one adder per broadcast, keyed by its name (unique per broadcast).
 var friendAdders sync.Map
 
-func friendAdderFor(port int, authSession *session.Session, selfXUID string, log *slog.Logger) *friendAdder {
-	a, _ := friendAdders.LoadOrStore(port, &friendAdder{authSession: authSession, selfXUID: selfXUID, log: log.With("src", "friend-adder")})
+func friendAdderFor(broadcast string, authSession *session.Session, selfXUID string, log *slog.Logger) *friendAdder {
+	a, _ := friendAdders.LoadOrStore(broadcast, &friendAdder{authSession: authSession, selfXUID: selfXUID, log: log.With("src", "friend-adder")})
 	return a.(*friendAdder)
 }
 

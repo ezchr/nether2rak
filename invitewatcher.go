@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -34,9 +35,9 @@ import (
 // issued over a loopback-only HTTP control endpoint (same pattern as bridge/pingserver.go's
 // existing ping API):
 //
-//	curl http://127.0.0.1:<InvitePort>/invites/start
-//	curl http://127.0.0.1:<InvitePort>/invites/stop
-//	curl http://127.0.0.1:<InvitePort>/invites/status
+//	curl http://127.0.0.1:<control_port>/invites/start
+//	curl http://127.0.0.1:<control_port>/invites/stop
+//	curl http://127.0.0.1:<control_port>/invites/status
 //
 // Once started, it runs a REPEATING cycle, not a one-shot pass: every XUID currently in the
 // queue file gets invited, then it immediately loops back to the start of the list and invites
@@ -112,7 +113,7 @@ type inviteController struct {
 	// list is which invite list the current run cycles through, set by Start.
 	list string
 
-	// statePath holds this invite port's inviteState, so the loop survives the session it runs
+	// statePath holds this broadcast's inviteState, so the loop survives the session it runs
 	// on. stateMu serialises writes to it: the loop records progress after every invite while
 	// Stop records that it was stopped, and Stop's write must be the one that lands.
 	statePath string
@@ -124,7 +125,7 @@ type inviteController struct {
 
 // newInviteController constructs a controller in the stopped state - see this file's package doc
 // for why starting stopped is load-bearing, not just a default.
-func newInviteController(xblSession *xbl.Session, invitePort int, log *slog.Logger) *inviteController {
+func newInviteController(xblSession *xbl.Session, broadcast string, log *slog.Logger) *inviteController {
 	l := log.With("src", "invite-watcher")
 	// Prune once here, at construction, rather than only as part of the invite loop's own read
 	// path - the loop only runs between "start" and "stop" (off by default, see this file's
@@ -133,10 +134,47 @@ func newInviteController(xblSession *xbl.Session, invitePort int, log *slog.Logg
 	// independent of whether the loop is ever started - see cmd/scraper's own startup prune
 	// for the other half of "independent of either process's uptime".
 	invitequeue.Prune(inviteQueueFile, l)
-	return &inviteController{xblSession: xblSession, log: l, statePath: fmt.Sprintf(inviteStateFileFmt, invitePort)}
+	path := fmt.Sprintf(inviteStateFileFmt, broadcast)
+	adoptLegacyInviteState(path, broadcast, l)
+	return &inviteController{xblSession: xblSession, log: l, statePath: path}
 }
 
-// inviteStateFileFmt names the file, one per invite port, that carries the invite loop across
+// legacyInviteState matches the state files named after an invite port, before the control port
+// replaced per-broadcast ports.
+var legacyInviteState = regexp.MustCompile(`^\.invite_state_\d+\.json$`)
+
+// adoptLegacyInviteState renames the primary broadcast's old port-named state file to path, so
+// invites that were running before the switch to one control port carry on where they were
+// instead of starting over. Only for the primary, and only when exactly one old file is there to
+// pick: with several, which belonged to which broadcast can't be told apart.
+func adoptLegacyInviteState(path, broadcast string, log *slog.Logger) {
+	if broadcast != primaryBroadcast {
+		return
+	}
+	if _, err := os.Stat(path); err == nil {
+		return
+	}
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		return
+	}
+	var found []string
+	for _, e := range entries {
+		if legacyInviteState.MatchString(e.Name()) {
+			found = append(found, e.Name())
+		}
+	}
+	if len(found) != 1 {
+		return
+	}
+	if err := os.Rename(found[0], path); err != nil {
+		log.Warn("could not take over the old invite state file", "from", found[0], "to", path, "err", err)
+		return
+	}
+	log.Info("invite state carried over from the old per-port file", "from", found[0], "to", path)
+}
+
+// inviteStateFileFmt names the file, one per broadcast, that carries the invite loop across
 // session generations.
 //
 // The loop is tied to its session: a rebuild (the MC token renewal every ~4h, a signaling or RTA
@@ -145,7 +183,7 @@ func newInviteController(xblSession *xbl.Session, invitePort int, log *slog.Logg
 // manual start began again from the top of the queue - over a long queue that meant the same
 // first few thousand players, again and again, and never the rest. With it, each new session
 // picks the loop up where the last one left off, inviting into itself.
-const inviteStateFileFmt = ".invite_state_%d.json"
+const inviteStateFileFmt = ".invite_state_%s.json"
 
 // inviteState is what inviteStateFileFmt holds.
 type inviteState struct {
@@ -356,11 +394,19 @@ func (c *inviteController) run(ctx context.Context, interval time.Duration, list
 	}
 }
 
-// startInviteControlServer serves the loopback-only start/stop/status endpoint for c. Mirrors
-// bridge.StartPingServer's shape exactly (loopback bind, plain HTTP, no auth - relies on the
-// port never being reachable off the VPS, same trust model as the ping API and pprof).
-// adderCtx outlives ctx on purpose: the friend adder is process-wide (see friendadder.go).
-func startInviteControlServer(ctx, adderCtx context.Context, addr string, c *inviteController, friendsCtl *friendsInviteController, adder *friendAdder, log *slog.Logger) {
+// inviteRoutes returns the start/stop/status endpoints for c, which the control server
+// (control.go) serves for one session: loopback only, plain HTTP, no auth - the same trust model
+// as the ping API and pprof. adderCtx outlives ctx on purpose: the friend adder is process-wide
+// (see friendadder.go).
+//
+// These used to be a server of their own on the broadcast's invite_port, started with each
+// session and shut down with it. Before that shutdown existed, every session rebuild (~8x/day)
+// started a new server on the same port while the old one kept running: only the first ever held
+// the port, so every later generation's controller was unreachable (confirmed 2026-09-16), and a
+// loop started on an old generation kept inviting into a dead session (2026-09-22). The control
+// server keeps both fixes: ctx still bounds every loop started here, and the routes are taken out
+// when ctx ends (controlServer.setInvites).
+func inviteRoutes(ctx, adderCtx context.Context, c *inviteController, friendsCtl *friendsInviteController, adder *friendAdder) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/invites/start", func(w http.ResponseWriter, r *http.Request) {
 		// ctx (this server's own sessionCtx param), not context.Background(): a loop rooted in
@@ -420,31 +466,7 @@ func startInviteControlServer(ctx, adderCtx context.Context, addr string, c *inv
 	registerFriendsInviteRoutes(ctx, mux, friendsCtl)
 	registerFriendAddRoutes(adderCtx, mux, adder)
 
-	server := &http.Server{Addr: addr, Handler: mux}
-	// ctx is sessionCtx from runSession's caller, not the process-lifetime ctx - this server is
-	// tied to one specific xblSession/inviteCtl/friendsCtl generation (see the call site's own
-	// comment on why), so it must go down with that generation rather than outliving it. Without
-	// this, every session rebuild (roughly 8x/day in practice - token renewals, RTA drops, etc.)
-	// spawned a brand new http.ListenAndServe on the same fixed port while the previous
-	// generation's server kept running forever with nothing to ever stop it: only the first
-	// server in the process's life ever actually held the port, and every later rebuild's
-	// ListenAndServe failed immediately with "address already in use", permanently orphaning
-	// that generation's invite controller from the loopback API (confirmed 2026-09-16 - paired
-	// "listening"/"stopped: bind: address already in use" log lines on every rebuild after the
-	// first, since the misleading "listening" line below logs before the bind is even attempted).
-	go func() {
-		<-ctx.Done()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = server.Shutdown(shutdownCtx)
-	}()
-
-	go func() {
-		log.Info("invite control server listening", "addr", addr)
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Warn("invite control server stopped", "err", err)
-		}
-	}()
+	return mux
 }
 
 // inviteExpiry is how long a discovered player stays in the invite rotation before being

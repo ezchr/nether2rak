@@ -108,6 +108,9 @@ func main() {
 		log.Error("failed to load config.json", "err", err)
 		os.Exit(1)
 	}
+	for _, note := range cfg.Notes {
+		log.Info("config: " + note)
+	}
 	if d := sharedPlayerDrift(cfg); d != nil {
 		log.Info("advertised player count drifts", "min", d.min, "max", d.max, "maxStep", d.maxStep,
 			"every", d.interval, "start", d.Current())
@@ -122,19 +125,6 @@ func main() {
 	if err != nil {
 		log.Error("failed to open friend activity file", "err", err)
 		os.Exit(1)
-	}
-
-	// Bound to loopback so the profiler is reachable only over an SSH tunnel, never from the
-	// public internet. Port is configurable (see PprofPort's doc comment) since a fixed port
-	// collides if more than one nether2rak instance runs on the same machine.
-	if debug {
-		pprofAddr := fmt.Sprintf("127.0.0.1:%d", cfg.PprofPort)
-		go func() {
-			log.Info("pprof listening (debug builds only)", "addr", pprofAddr)
-			if err := http.ListenAndServe(pprofAddr, nil); err != nil {
-				log.Warn("pprof server stopped", "err", err)
-			}
-		}()
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -156,10 +146,20 @@ func main() {
 		os.Exit(1)
 	}
 
-	// --- Real-latency ping API for the Folia-side PingDisplay plugin (loopback only). Port is
-	// configurable (see PingPort's doc comment) for the same multi-instance reason as pprof's.
-	// One per process: it answers for every broadcast (entries are keyed by player XUID).
-	bridge.StartPingServer(fmt.Sprintf("127.0.0.1:%d", cfg.PingPort), log)
+	// --- The control port (control.go): the ping API for the BDS ping plugin, every broadcast's
+	// invite controls, and pprof under -debug - one loopback-only server for the process, bound to
+	// 127.0.0.1 so none of it is reachable from the internet. Without it the relay still
+	// broadcasts; only those controls are missing.
+	controlAddr := fmt.Sprintf("127.0.0.1:%d", cfg.ControlPort)
+	control := newControlServer(debug)
+	if err := control.listen(ctx, controlAddr, log); err != nil {
+		log.Error("could not open the control port - ping, invites and pprof are off for this run "+
+			"(another relay on this machine may be using it: give each its own control_port)",
+			"addr", controlAddr, "err", err)
+	} else {
+		controlSrv = control
+		log.Info("control port listening", "addr", controlAddr, "pprof", debug)
+	}
 
 	var allowXUID func(string) bool
 	if len(cfg.AllowedXUIDs) > 0 {
@@ -195,7 +195,7 @@ func main() {
 	case bridge.TransportNetherNet, bridge.TransportNetherNetNoRelay:
 		normalized, err := bridge.NormalizeNetherNetAddress(cfg.NetherNetBackendAddress)
 		if err != nil {
-			log.Error("invalid nethernet_backend_address in config.json", "err", err)
+			log.Error("invalid server_address in config.json", "err", err)
 			os.Exit(1)
 		}
 		if strings.EqualFold(strings.TrimSpace(cfg.BackendTransport), bridge.TransportNetherNetNoRelay) {
@@ -216,7 +216,7 @@ func main() {
 				"address", normalized)
 			log.Warn("no-relay mode leaves player authentication to the backend - make sure it " +
 				"verifies Xbox Live logins itself. BDS: online-mode=true. Dragonfly: point " +
-				"nethernet_backend_address at a listener with authentication on, not the " +
+				"server_address at a listener with authentication on, not the " +
 				"auth-disabled one the relay used. Geyser: validate-bedrock-login: true, and bind " +
 				"an address players can reach")
 		} else {
@@ -252,7 +252,7 @@ func main() {
 			os.Exit(1)
 		}
 	} else {
-		log.Info("direct-ip front door disabled (set direct_ip_enabled to turn it on)")
+		log.Info("direct-ip front door disabled (set relay_direct_ip to turn it on)")
 	}
 
 	log.Info("running - press Ctrl+C to stop (there is no console prompt; this process just waits for connections)")
@@ -463,13 +463,13 @@ func runSession(ctx context.Context, authSession *session.Session, rta *xbl.RTA,
 	// everything else that references the old xblSession, since this XUID list belongs to the
 	// specific session being recreated.
 	//
-	// Only when this broadcast has an invite_port of its own - extra broadcasts default to 0
-	// (off), since two broadcasts can't share one control port.
-	if cfg.InvitePort > 0 {
-		inviteCtl := newInviteController(xblSession, cfg.InvitePort, log)
+	// The primary broadcast's controls are always there; an extra broadcast's only with
+	// "invites": true. None in a process without a control port (a -login broadcaster).
+	if controlSrv != nil && cfg.InvitesEnabled {
+		inviteCtl := newInviteController(xblSession, cfg.BroadcastName, log)
 		friendsInviteCtl := newFriendsInviteController(authSession, xblSession, log)
-		adder := friendAdderFor(cfg.InvitePort, authSession, xuid, log)
-		startInviteControlServer(sessionCtx, ctx, fmt.Sprintf("127.0.0.1:%d", cfg.InvitePort), inviteCtl, friendsInviteCtl, adder, log)
+		adder := friendAdderFor(cfg.BroadcastName, authSession, xuid, log)
+		controlSrv.setInvites(sessionCtx, cfg.BroadcastName, inviteRoutes(sessionCtx, ctx, inviteCtl, friendsInviteCtl, adder))
 		// If invites were running when the previous session (or relay process) ended, carry on
 		// with them on this one - see inviteStateFileFmt.
 		inviteCtl.ResumeIfWanted(sessionCtx)

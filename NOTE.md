@@ -114,8 +114,8 @@ cd /root/mcjava/n2r-unified/nether2rak
 tmux new-session -d -s n2r-uni './nether2rak-unified 2>&1 | tee -a run.log'
 ```
 
-Ping port 7779, pprof 6062 — distinct from `n2r` (7777/6060) and `n2r-nethernet` (7778/6061), so
-they can run side by side. Token is the `ezchr` account.
+Control port 7779 (ping, invites and pprof on one port) — distinct from the other run
+directories' control ports, so they can run side by side. Token is the `ezchr` account.
 
 Test the front door without a game client:
 

@@ -13,9 +13,9 @@ import (
 	"sort"
 	"time"
 
-	"github.com/sandertv/gophertunnel/minecraft/auth"
 	"github.com/gameparrot/netherconnect/session"
 	"github.com/gameparrot/netherconnect/xbl"
+	"github.com/sandertv/gophertunnel/minecraft/auth"
 	"golang.org/x/oauth2"
 )
 

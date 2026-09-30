@@ -47,11 +47,7 @@ import (
 // unit tested directly.
 func resolveBroadcasts(cfg FileConfig) (out []BroadcastConfig, problems []string) {
 	seenFile := map[string]string{tokenCacheFile: "primary"}
-	seenName := map[string]bool{"primary": true}
-	seenPort := map[int]string{}
-	if cfg.InvitePort > 0 {
-		seenPort[cfg.InvitePort] = "primary"
-	}
+	seenName := map[string]bool{primaryBroadcast: true}
 	for i, b := range cfg.ExtraBroadcasts {
 		if strings.TrimSpace(b.Name) == "" {
 			b.Name = fmt.Sprintf("extra-%d", i+1)
@@ -69,12 +65,9 @@ func resolveBroadcasts(cfg FileConfig) (out []BroadcastConfig, problems []string
 			continue
 		}
 		if b.InvitePort > 0 {
-			if other, ok := seenPort[b.InvitePort]; ok {
-				problems = append(problems, fmt.Sprintf("extra broadcast %q: invite_port %d is already used by %s - invite control turned off for it", b.Name, b.InvitePort, other))
-				b.InvitePort = 0
-			} else {
-				seenPort[b.InvitePort] = b.Name
-			}
+			// Its own invite port is from before the control port: read it as "invites on".
+			b.Invites, b.InvitePort = true, 0
+			problems = append(problems, fmt.Sprintf("extra broadcast %q: invite_port is replaced by \"invites\": true - its invite controls are on the control port, under %s%s/", b.Name, controlBroadcastPrefix, b.Name))
 		}
 		if b.HostName == "" {
 			b.HostName = cfg.HostName
@@ -90,9 +83,10 @@ func resolveBroadcasts(cfg FileConfig) (out []BroadcastConfig, problems []string
 }
 
 // forBroadcast is cfg as one broadcast sees it: the shared settings, with this broadcast's
-// own Friends-tab names and invite port.
+// own Friends-tab names and whether its invite controls are on.
 func (b BroadcastConfig) forBroadcast(cfg FileConfig) FileConfig {
-	cfg.HostName, cfg.WorldName, cfg.InvitePort = b.HostName, b.WorldName, b.InvitePort
+	cfg.HostName, cfg.WorldName = b.HostName, b.WorldName
+	cfg.BroadcastName, cfg.InvitesEnabled = b.Name, b.Invites
 	cfg.NoFriendAccept = b.NoFriendAccept
 	cfg.ExtraBroadcasts = nil
 	return cfg
@@ -143,6 +137,7 @@ func runExtraBroadcast(ctx context.Context, b BroadcastConfig, cfg FileConfig, a
 func runBroadcast(ctx context.Context, name string, authSession *session.Session, cfg FileConfig,
 	allowXUID func(string) bool, friendActivity *friendactivity.Store, debug bool, log *slog.Logger) error {
 	log = log.With("broadcast", name)
+	cfg.BroadcastName = name
 
 	xstsTok, err := authSession.RequestXBLToken(ctx, "http://xboxlive.com")
 	if err != nil {

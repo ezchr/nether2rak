@@ -82,11 +82,31 @@ func unregisterPing(xuid string, entry *connLatencies) {
 	}
 }
 
-// StartPingServer starts the loopback-only HTTP ping API in the background. addr should be a
-// 127.0.0.1 address - this is intentionally not reachable off the VPS.
+// StartPingServer starts the loopback-only HTTP ping API on a server of its own, in the
+// background. addr should be a 127.0.0.1 address - this is intentionally not reachable off the
+// VPS. The relay itself serves PingHandler on its shared control port instead.
 func StartPingServer(addr string, log *slog.Logger) {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/ping", func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("/ping", PingHandler())
+
+	server := &http.Server{Addr: addr, Handler: mux, ReadTimeout: 5 * time.Second}
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		log.Error("could not start ping server", "addr", addr, "err", err)
+		return
+	}
+	log.Info("ping server listening", "addr", addr)
+	go func() {
+		if err := server.Serve(ln); err != nil {
+			log.Warn("ping server stopped", "err", err)
+		}
+	}()
+}
+
+// PingHandler answers GET /ping?xuid=<xuid> with that player's real round trip as JSON
+// {"ms", "client_ms", "backend_ms"}, or 404 if they are not connected through this relay.
+func PingHandler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		xuid := r.URL.Query().Get("xuid")
 		if xuid == "" {
 			http.Error(w, "missing xuid", http.StatusBadRequest)
@@ -119,19 +139,6 @@ func StartPingServer(addr string, log *slog.Logger) {
 		// client_ms / backend_ms are ms's two legs, for telling where a high reading comes from.
 		_ = json.NewEncoder(w).Encode(map[string]int64{"ms": totalMs, "client_ms": clientMs, "backend_ms": backendMs})
 	})
-
-	server := &http.Server{Addr: addr, Handler: mux, ReadTimeout: 5 * time.Second}
-	ln, err := net.Listen("tcp", addr)
-	if err != nil {
-		log.Error("could not start ping server", "addr", addr, "err", err)
-		return
-	}
-	log.Info("ping server listening", "addr", addr)
-	go func() {
-		if err := server.Serve(ln); err != nil {
-			log.Warn("ping server stopped", "err", err)
-		}
-	}()
 }
 
 // ConnectedXUIDs returns the XUID of every player currently connected through this relay's

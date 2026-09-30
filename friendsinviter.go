@@ -22,11 +22,11 @@ import (
 // OFF BY DEFAULT, same shape as the queue-based inviter: starts stopped, controlled by its own
 // loopback-only HTTP endpoint:
 //
-//	curl http://127.0.0.1:<InvitePort>/invites/friends/start
-//	curl http://127.0.0.1:<InvitePort>/invites/friends/stop
-//	curl http://127.0.0.1:<InvitePort>/invites/friends/status
+//	curl http://127.0.0.1:<control_port>/invites/friends/start
+//	curl http://127.0.0.1:<control_port>/invites/friends/stop
+//	curl http://127.0.0.1:<control_port>/invites/friends/status
 //
-// Shares the InvitePort control server with the queue-based inviter (different path prefix,
+// Shares the control port with the queue-based inviter (different path prefix,
 // same HTTP server) rather than opening a second port - see startInviteControlServer.
 //
 // Runs the same repeating-lap shape: re-fetch the friends list, invite everyone on it, loop

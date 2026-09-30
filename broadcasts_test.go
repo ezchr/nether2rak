@@ -31,32 +31,32 @@ func TestNextTokenFileSkipsExistingAndPrimary(t *testing.T) {
 
 func TestResolveBroadcastsDefaultsAndValidation(t *testing.T) {
 	cfg := defaultConfig()
-	cfg.HostName, cfg.WorldName, cfg.InvitePort = "chrisgg", "Dragonfly Server", 7783
+	cfg.HostName, cfg.WorldName = "chrisgg", "Dragonfly Server"
 	cfg.ExtraBroadcasts = []BroadcastConfig{
 		{TokenFile: "token2.json"}, // defaults filled in
-		{Name: "alt", TokenFile: "token3.json", WorldName: "Alt World", InvitePort: 7790},
+		{Name: "alt", TokenFile: "token3.json", WorldName: "Alt World", Invites: true},
 		{TokenFile: ""}, // no token file
-		{Name: "dupefile", TokenFile: "token2.json"},                    // reuses extra-1's file
-		{Name: "usesprimary", TokenFile: "token.json"},                  // reuses the primary's file
-		{Name: "alt", TokenFile: "token9.json"},                         // name taken
-		{Name: "portclash", TokenFile: "token4.json", InvitePort: 7783}, // primary's port
+		{Name: "dupefile", TokenFile: "token2.json"},                  // reuses extra-1's file
+		{Name: "usesprimary", TokenFile: "token.json"},                // reuses the primary's file
+		{Name: "alt", TokenFile: "token9.json"},                       // name taken
+		{Name: "oldport", TokenFile: "token4.json", InvitePort: 7783}, // pre-control-port config
 	}
 	got, problems := resolveBroadcasts(cfg)
 
 	if len(got) != 3 {
 		t.Fatalf("want 3 usable broadcasts, got %d: %+v", len(got), got)
 	}
-	if got[0].Name != "extra-1" || got[0].HostName != "chrisgg" || got[0].WorldName != "Dragonfly Server" || got[0].InvitePort != 0 {
+	if got[0].Name != "extra-1" || got[0].HostName != "chrisgg" || got[0].WorldName != "Dragonfly Server" || got[0].Invites {
 		t.Errorf("defaults not applied: %+v", got[0])
 	}
-	if got[1].Name != "alt" || got[1].WorldName != "Alt World" || got[1].HostName != "chrisgg" || got[1].InvitePort != 7790 {
+	if got[1].Name != "alt" || got[1].WorldName != "Alt World" || got[1].HostName != "chrisgg" || !got[1].Invites {
 		t.Errorf("explicit values not kept: %+v", got[1])
 	}
-	if got[2].Name != "portclash" || got[2].InvitePort != 0 {
-		t.Errorf("a clashing invite_port must be turned off, not kept: %+v", got[2])
+	if got[2].Name != "oldport" || !got[2].Invites || got[2].InvitePort != 0 {
+		t.Errorf("an old invite_port must read as invites on: %+v", got[2])
 	}
 	joined := strings.Join(problems, "\n")
-	for _, want := range []string{"token_file is empty", `"token2.json" is already used by extra-1`, `"token.json" is already used by primary`, `name "alt" is already used`, "invite_port 7783 is already used by primary"} {
+	for _, want := range []string{"token_file is empty", `"token2.json" is already used by extra-1`, `"token.json" is already used by primary`, `name "alt" is already used`, `"oldport": invite_port is replaced by "invites": true`} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("missing problem %q in:\n%s", want, joined)
 		}
@@ -72,11 +72,11 @@ func TestResolveBroadcastsNoneConfigured(t *testing.T) {
 
 func TestForBroadcastOverridesOnlyItsOwnFields(t *testing.T) {
 	cfg := defaultConfig()
-	cfg.HostName, cfg.WorldName, cfg.InvitePort, cfg.MaxPlayers = "h", "w", 7783, 30
+	cfg.HostName, cfg.WorldName, cfg.MaxPlayers = "h", "w", 30
 	cfg.ExtraBroadcasts = []BroadcastConfig{{TokenFile: "x"}}
 	b := BroadcastConfig{Name: "b", TokenFile: "t2.json", HostName: "h2", WorldName: "w2"}
 	c := b.forBroadcast(cfg)
-	if c.HostName != "h2" || c.WorldName != "w2" || c.InvitePort != 0 {
+	if c.HostName != "h2" || c.WorldName != "w2" || c.BroadcastName != "b" || c.InvitesEnabled {
 		t.Errorf("broadcast fields not applied: %+v", c)
 	}
 	if c.MaxPlayers != 30 || c.BackendTransport != cfg.BackendTransport || c.Protocol != cfg.Protocol {

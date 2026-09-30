@@ -2,15 +2,18 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
+	"strings"
 )
 
 type FileConfig struct {
 	// BackendTransport selects how the relay reaches the backend server:
 	//
-	//	"raknet"            - (default) a RakNet server such as Geyser, dialed at GeyserAddress.
+	//	"raknet"            - (default) any RakNet Bedrock server (Geyser, older BDS, PocketMine,
+	//	                      Nukkit/PNX...), dialed at ServerAddress.
 	//	"nethernet"         - a server started with transport=nethernet, reached at
-	//	                      NetherNetBackendAddress over WebRTC. The relay is then NetherNet on
+	//	                      ServerAddress over WebRTC. The relay is then NetherNet on
 	//	                      both legs and no RakNet is involved anywhere in the path.
 	//	"nethernet-norelay" - as above, except this process stays out of the data path: it keeps
 	//	                      the Xbox Live session and signaling (which no Bedrock server can hold
@@ -28,22 +31,32 @@ type FileConfig struct {
 	// would let anyone claim any XUID once players can reach it directly.
 	BackendTransport string `json:"backend_transport"`
 
-	// GeyserAddress is host:port of Geyser's RakNet listener. Geyser's listener MUST have
-	// encryption disabled for this bridge to work - see proxy/dial.go's ForwardLogin comment.
-	// Only used when BackendTransport is "raknet".
-	GeyserAddress string `json:"geyser_address"`
+	// ServerAddress is the game server players end up on, as "host:port" - the one setting for it
+	// whatever BackendTransport is:
+	//
+	//	"raknet"                         - the server's RakNet (UDP) port, e.g. "127.0.0.1:19132".
+	//	                                   A Geyser listener here MUST have encryption disabled -
+	//	                                   see proxy/dial.go's ForwardLogin comment.
+	//	"nethernet", "nethernet-norelay" - the server's TCP server-port, where a BDS running
+	//	                                   transport=nethernet serves /v1/join, e.g.
+	//	                                   "127.0.0.1:19134". "http://host:port" also works. It is
+	//	                                   NOT the UDP LAN-discovery port (7551): BDS does not
+	//	                                   announce dedicated servers over LAN discovery,
+	//	                                   confirmed 2026-09-15 by packet capture.
+	//
+	// Empty means the mode's default (127.0.0.1:19132 for raknet, 127.0.0.1:19134 otherwise).
+	ServerAddress string `json:"server_address"`
 
-	// NetherNetBackendAddress is the base URL of the backend's NetherNet HTTP signaling
-	// endpoint, e.g. "http://127.0.0.1:19134". Used when BackendTransport is "nethernet" or
-	// "nethernet-norelay".
-	//
-	// This is the backend's TCP server-port - the same port named by server-port in BDS's
-	// server.properties - because that is where a BDS running transport=nethernet serves the
-	// /v1/join signaling endpoints. It is NOT the UDP LAN-discovery port (7551): BDS does not
-	// announce dedicated servers over LAN discovery, confirmed 2026-09-15 by packet capture.
-	//
-	// A bare "host:port" is accepted and assumed to be plain HTTP.
-	NetherNetBackendAddress string `json:"nethernet_backend_address"`
+	// GeyserAddress and NetherNetBackendAddress are what ServerAddress used to be split into, one
+	// per kind of backend. They are still read so older config files keep working (see
+	// resolveServerAddress), and after loading they hold ServerAddress in the form each transport
+	// needs, so the rest of the code reads them as before. New configs should not set them.
+	GeyserAddress           string `json:"geyser_address,omitempty"`
+	NetherNetBackendAddress string `json:"nethernet_backend_address,omitempty"`
+
+	// Notes are things worth telling the operator about the file that was loaded - old setting
+	// names, settings the chosen mode ignores. Never read from or written to the file.
+	Notes []string `json:"-"`
 
 	// World info shown on the Friends tab / session listing.
 	HostName   string `json:"host_name"`
@@ -136,28 +149,25 @@ type FileConfig struct {
 	// It must not collide with the backend's own port.
 	RelayDirectIPListenAddress string `json:"relay_direct_ip_listen_address"`
 
-	// InvitePort is the loopback port the invite-everyone-from-another-server control endpoint
-	// listens on (see invitewatcher.go). The feature itself is OFF BY DEFAULT regardless of this
-	// port being open - it only starts sending anything after a "start" is issued to it. Same
-	// multi-instance caveat as PingPort: give each concurrently-run instance its own port.
-	InvitePort int `json:"invite_port"`
+	// ControlPort is the one loopback-only (127.0.0.1) HTTP port for controlling and reading the
+	// relay - see control.go for every path on it: /ping (the BDS ping plugin), /invites/... and
+	// /friends/add/... (invites, OFF until started), /debug/pprof/... (only with -debug). Give
+	// each relay process on one machine its own. Default 7777.
+	ControlPort int `json:"control_port"`
+
+	// InvitePort, PingPort and PprofPort were ports of their own before ControlPort. Still read
+	// so older files keep working: with no control_port set, the control port takes ping_port's
+	// number (so a ping plugin pointed at it keeps working), else invite_port's. See
+	// resolveControlPort.
+	InvitePort int `json:"invite_port,omitempty"`
+	PingPort   int `json:"ping_port,omitempty"`
+	PprofPort  int `json:"pprof_port,omitempty"`
 
 	// NoFriendAccept stops this account auto-accepting incoming Xbox Live friend requests. By
 	// default every broadcasting account accepts them, since a friend is who can see the world;
 	// set it for an account that is also somebody's own, whose friends list they want to manage
 	// themselves. Applies to the primary broadcast; each extra broadcast has its own.
 	NoFriendAccept bool `json:"no_friend_accept"`
-
-	// PingPort is the loopback port the real-latency ping API (for the Folia-side
-	// PingDisplay plugin) listens on. Only needs to change from the default if running
-	// more than one nether2rak instance on the same machine (e.g. two accounts
-	// broadcasting the same world) - each instance needs its own port or the second
-	// one fails to start with "address already in use".
-	PingPort int `json:"ping_port"`
-
-	// PprofPort is the loopback port the Go profiler listens on in -debug mode. Same
-	// multi-instance caveat as PingPort.
-	PprofPort int `json:"pprof_port"`
 
 	// ExtraBroadcasts publishes the same backend as additional Friends-tab worlds, each hosted
 	// by its OWN Xbox account (its own token file). Every Xbox session is capped at 30 members
@@ -166,6 +176,11 @@ type FileConfig struct {
 	// primary broadcast (token.json, host_name, world_name above) is unchanged and always runs.
 	// See broadcasts.go.
 	ExtraBroadcasts []BroadcastConfig `json:"extra_broadcasts"`
+
+	// BroadcastName and InvitesEnabled describe the one broadcast a copy of the config is being
+	// run for (see runBroadcast and BroadcastConfig.forBroadcast). Never read from the file.
+	BroadcastName  string `json:"-"`
+	InvitesEnabled bool   `json:"-"`
 }
 
 // BroadcastConfig is one extra Friends-tab broadcast. Only TokenFile is required.
@@ -179,10 +194,13 @@ type BroadcastConfig struct {
 	// HostName / WorldName shown on the Friends tab. Default: the primary's.
 	HostName  string `json:"host_name"`
 	WorldName string `json:"world_name"`
-	// InvitePort, if above zero, starts this broadcast's own invite control server on that
-	// loopback port (see invitewatcher.go). Default 0: off - the primary's invite_port can't be
-	// shared, and every broadcast's control server needs a port of its own.
-	InvitePort int `json:"invite_port"`
+	// Invites puts this broadcast's invite controls on the control port, under
+	// /broadcast/<name>/invites/... (see control.go). Default false: off. The primary broadcast's
+	// are always there, at /invites/...
+	Invites bool `json:"invites"`
+	// InvitePort is what Invites used to be: a port of its own. Above zero, it is read as
+	// Invites: true.
+	InvitePort int `json:"invite_port,omitempty"`
 	// NoFriendAccept: as FileConfig.NoFriendAccept, for this broadcast's account. Not inherited
 	// from the primary - each account's friends list is its own.
 	NoFriendAccept bool `json:"no_friend_accept"`
@@ -191,28 +209,27 @@ type BroadcastConfig struct {
 func defaultConfig() FileConfig {
 	return FileConfig{
 		// Defaults preserve the original behaviour exactly: RakNet into Geyser. The NetherNet
-		// backend is strictly opt-in via backend_transport.
-		BackendTransport:        "raknet",
-		GeyserAddress:           "127.0.0.1:19132",
-		NetherNetBackendAddress: "http://127.0.0.1:19134",
-		HostName:                "Nether2Rak",
-		WorldName:               "Nether2Rak",
-		MaxPlayers:              20,
+		// backend is strictly opt-in via backend_transport. ServerAddress is left empty on
+		// purpose: its default depends on the transport, and an older file may still name the
+		// address under geyser_address / nethernet_backend_address (see resolveServerAddress).
+		BackendTransport: "raknet",
+		HostName:         "Nether2Rak",
+		WorldName:        "Nether2Rak",
+		MaxPlayers:       20,
 		// These matched the MCXboxBroadcastStandalone.jar you uploaded (Bedrock_v2168, build
 		// 149) at the time this was written. Bedrock's protocol number changes with nearly
 		// every release - CHECK Geyser's own startup log for "protocol X" and keep this in
 		// sync, or joins will fail with an outdated-client/server disconnect.
-		Protocol:                2168,
-		Version:                 "1.26.44",
-		UpdateIntervalSeconds:   30,
-		Compression:             "snappy",
-		CompressionThreshold:    256,
-		FixNativeBDSPersistence: false,
+		Protocol:                   2168,
+		Version:                    "1.26.44",
+		UpdateIntervalSeconds:      30,
+		Compression:                "snappy",
+		CompressionThreshold:       256,
+		FixNativeBDSPersistence:    false,
 		RelayDirectIP:              false,
 		RelayDirectIPListenAddress: ":19132",
-		InvitePort:              7782,
-		PingPort:                7777,
-		PprofPort:               6060,
+		// ControlPort is left 0 on purpose, like ServerAddress: an older file may still carry
+		// the ports it replaced (see resolveControlPort).
 	}
 }
 
@@ -220,8 +237,12 @@ func loadConfig(path string) (FileConfig, error) {
 	b, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
 		cfg := defaultConfig()
+		resolveServerAddress(&cfg, nil)
+		resolveControlPort(&cfg, nil)
+		cfg.GeyserAddress, cfg.NetherNetBackendAddress = "", "" // new files carry server_address only
 		out, _ := json.MarshalIndent(cfg, "", "  ")
 		_ = os.WriteFile(path, out, 0644)
+		resolveServerAddress(&cfg, nil)
 		return cfg, nil
 	}
 	if err != nil {
@@ -231,5 +252,128 @@ func loadConfig(path string) (FileConfig, error) {
 	if err := json.Unmarshal(b, &cfg); err != nil {
 		return FileConfig{}, err
 	}
+	var present map[string]json.RawMessage
+	_ = json.Unmarshal(b, &present)
+	resolveServerAddress(&cfg, present)
+	resolveControlPort(&cfg, present)
+	noteIgnoredSettings(&cfg, present)
 	return cfg, nil
+}
+
+const (
+	defaultRakNetAddress    = "127.0.0.1:19132"
+	defaultNetherNetAddress = "127.0.0.1:19134"
+)
+
+// usesNetherNet reports whether the configured transport reaches the backend over NetherNet
+// (its /v1/join HTTP endpoint) rather than RakNet.
+func usesNetherNet(cfg FileConfig) bool {
+	switch strings.ToLower(strings.TrimSpace(cfg.BackendTransport)) {
+	case "nethernet", "nethernet-norelay":
+		return true
+	}
+	return false
+}
+
+// resolveServerAddress settles the one backend address: server_address if the file sets it,
+// otherwise the older per-transport key that applies to the chosen transport, otherwise the
+// transport's default. It then fills GeyserAddress / NetherNetBackendAddress from it in the form
+// the transport uses, which is what the rest of the code reads. present is the set of keys in
+// the file (nil for a freshly written default) and only decides which notes are added.
+func resolveServerAddress(cfg *FileConfig, present map[string]json.RawMessage) {
+	nether := usesNetherNet(*cfg)
+	usedKey, unusedKey := "geyser_address", "nethernet_backend_address"
+	if nether {
+		usedKey, unusedKey = unusedKey, usedKey
+	}
+	_, hasUsed := present[usedKey]
+	_, hasUnused := present[unusedKey]
+
+	if cfg.ServerAddress == "" {
+		legacy := cfg.GeyserAddress
+		if nether {
+			legacy = cfg.NetherNetBackendAddress
+		}
+		switch {
+		case hasUsed && legacy != "":
+			cfg.ServerAddress = legacy
+			cfg.Notes = append(cfg.Notes, fmt.Sprintf(
+				"config.json names the server under %q - that still works, but it is now just "+
+					"\"server_address\"; renaming it is enough", usedKey))
+		case nether:
+			cfg.ServerAddress = defaultNetherNetAddress
+		default:
+			cfg.ServerAddress = defaultRakNetAddress
+		}
+	} else if hasUsed {
+		cfg.Notes = append(cfg.Notes, fmt.Sprintf(
+			"%q is ignored because \"server_address\" is set - it can be deleted", usedKey))
+	}
+	if hasUnused {
+		cfg.Notes = append(cfg.Notes, fmt.Sprintf(
+			"%q is ignored with backend_transport %q (only \"server_address\" is used) - it can be deleted",
+			unusedKey, cfg.BackendTransport))
+	}
+
+	address := strings.TrimSpace(cfg.ServerAddress)
+	if nether {
+		cfg.NetherNetBackendAddress = address
+	} else {
+		// RakNet has no URL form; tolerate one pasted from a NetherNet config.
+		address = strings.TrimPrefix(strings.TrimPrefix(address, "http://"), "https://")
+		cfg.GeyserAddress = strings.TrimSuffix(address, "/")
+	}
+}
+
+const defaultControlPort = 7777
+
+// resolveControlPort settles the control port: control_port if the file sets it, otherwise the
+// port an older file gave the ping API (so a BDS ping plugin still pointed at it keeps working),
+// otherwise its invite port, otherwise the default. It notes each old port setting it finds.
+func resolveControlPort(cfg *FileConfig, present map[string]json.RawMessage) {
+	old := []string{}
+	for _, key := range []string{"ping_port", "invite_port", "pprof_port"} {
+		if _, ok := present[key]; ok {
+			old = append(old, fmt.Sprintf("%q", key))
+		}
+	}
+	switch {
+	case cfg.ControlPort > 0:
+	case cfg.PingPort > 0:
+		cfg.ControlPort = cfg.PingPort
+	case cfg.InvitePort > 0:
+		cfg.ControlPort = cfg.InvitePort
+	default:
+		cfg.ControlPort = defaultControlPort
+	}
+	if len(old) > 0 {
+		cfg.Notes = append(cfg.Notes, fmt.Sprintf(
+			"%s replaced by \"control_port\" - ping, invites and pprof are all served on %d now "+
+				"(same paths as before); set \"control_port\": %d and delete the old ones",
+			strings.Join(old, ", "), cfg.ControlPort, cfg.ControlPort))
+	}
+	// The primary broadcast's invite controls are always on the control port; forBroadcast sets
+	// these again for each extra broadcast.
+	cfg.BroadcastName, cfg.InvitesEnabled = primaryBroadcast, true
+}
+
+// noteIgnoredSettings adds a note for each setting the file sets that the chosen mode never
+// reads, so a leftover from another setup can't pass for something that matters.
+func noteIgnoredSettings(cfg *FileConfig, present map[string]json.RawMessage) {
+	has := func(key string) bool { _, ok := present[key]; return ok }
+	if strings.EqualFold(strings.TrimSpace(cfg.BackendTransport), "nethernet-norelay") {
+		// Players connect straight to the backend in this mode: nothing is compressed, logged in
+		// or encrypted by this process.
+		for _, key := range []string{"compression", "compression_threshold", "fix_native_bds_persistence", "disable_client_encryption"} {
+			if has(key) {
+				cfg.Notes = append(cfg.Notes, fmt.Sprintf(
+					"%q does nothing with backend_transport \"nethernet-norelay\" (players never pass "+
+						"through the relay) - it can be deleted", key))
+			}
+		}
+	}
+	if !cfg.RelayDirectIP && has("relay_direct_ip_listen_address") {
+		cfg.Notes = append(cfg.Notes,
+			"\"relay_direct_ip_listen_address\" does nothing while \"relay_direct_ip\" is false - it can be deleted")
+	}
 }
