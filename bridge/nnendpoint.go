@@ -17,7 +17,7 @@ import (
 	"sync"
 
 	"github.com/df-mc/go-nethernet"
-	"github.com/gameparrot/netherconnect/session"
+	"github.com/ezchr/nether2rak/session"
 )
 
 // This file implements the dial half of Bedrock's HTTP-based NetherNet signaling, which is how

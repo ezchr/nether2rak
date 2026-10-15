@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gameparrot/netherconnect/invitequeue"
+	"github.com/ezchr/nether2rak/invitequeue"
 )
 
 // The player files hold only what a person reading them cares about (who, and where they were

@@ -23,12 +23,12 @@ import (
 	"time"
 
 	"github.com/df-mc/go-nethernet"
-	"github.com/gameparrot/netherconnect/bridge"
-	"github.com/gameparrot/netherconnect/invitequeue"
-	"github.com/gameparrot/netherconnect/proxy"
-	"github.com/gameparrot/netherconnect/session"
-	"github.com/gameparrot/netherconnect/xbl"
-	"github.com/gameparrot/netherconnect/xbl/friendactivity"
+	"github.com/ezchr/nether2rak/bridge"
+	"github.com/ezchr/nether2rak/invitequeue"
+	"github.com/ezchr/nether2rak/proxy"
+	"github.com/ezchr/nether2rak/session"
+	"github.com/ezchr/nether2rak/xbl"
+	"github.com/ezchr/nether2rak/xbl/friendactivity"
 	"github.com/sandertv/gophertunnel/minecraft/auth"
 	"github.com/sandertv/gophertunnel/minecraft/protocol/packet"
 	"golang.org/x/oauth2"
@@ -152,13 +152,25 @@ func main() {
 	// broadcasts; only those controls are missing.
 	controlAddr := fmt.Sprintf("127.0.0.1:%d", cfg.ControlPort)
 	control := newControlServer(debug)
-	if err := control.listen(ctx, controlAddr, log); err != nil {
+	if cfg.ControlOnDirectIP && cfg.RelayDirectIP {
+		controlSrv = control
+		log.Info("control routes served on the direct-ip door", "addr", cfg.RelayDirectIPListenAddress, "pprof", debug)
+	} else if err := control.listen(ctx, controlAddr, log); err != nil {
 		log.Error("could not open the control port - ping, invites and pprof are off for this run "+
 			"(another relay on this machine may be using it: give each its own control_port)",
 			"addr", controlAddr, "err", err)
 	} else {
 		controlSrv = control
 		log.Info("control port listening", "addr", controlAddr, "pprof", debug)
+	}
+
+	if cfg.ListingToggle {
+		listing = newListingGate("listing_state.json", log)
+		log.Info("friends-tab listing toggle on: /broadcast on|off in game, or the control port's /listing/on|off", "listed", listing.On())
+	}
+	if network, err = setupNetwork(cfg, authSession, log); err != nil {
+		log.Error("invalid servers list in config.json", "err", err)
+		os.Exit(1)
 	}
 
 	var allowXUID func(string) bool
@@ -189,7 +201,13 @@ func main() {
 	// Resolve and sanity-check the backend transport before announcing the world. A bad address
 	// or a backend that isn't actually speaking NetherNet is worth failing/warning about here,
 	// rather than letting it surface as an unexplained stall on the first player's join.
-	switch strings.ToLower(strings.TrimSpace(cfg.BackendTransport)) {
+	backendTransport := strings.ToLower(strings.TrimSpace(cfg.BackendTransport))
+	if network != nil {
+		log.Info("network mode: players can move between servers", "servers", network.ServerNames(), "default", network.Default)
+		backendTransport = "network"
+	}
+	switch backendTransport {
+	case "network":
 	case "", bridge.TransportRakNet:
 		log.Info("relaying into backend over raknet", "address", cfg.GeyserAddress)
 	case bridge.TransportNetherNet, bridge.TransportNetherNetNoRelay:
@@ -246,6 +264,7 @@ func main() {
 			Protocol:      cfg.Protocol,
 			Version:       cfg.Version,
 			Relay:         relayConfig(cfg, authSession, allowXUID, friendActivity, log),
+			Extra:         directIPExtra(cfg, control),
 			Log:           log,
 		}); err != nil {
 			log.Error("failed to start direct-ip front door", "err", err)
@@ -331,6 +350,16 @@ func runSession(ctx context.Context, authSession *session.Session, rta *xbl.RTA,
 
 	sessionCtx, cancelSession := context.WithCancelCause(ctx)
 	defer cancelSession(nil)
+	if listing != nil {
+		off := listing.offSignal()
+		go func() {
+			select {
+			case <-off:
+				cancelSession(errListingOff)
+			case <-sessionCtx.Done():
+			}
+		}()
+	}
 
 	// bridge.Listen (above) baked a snapshot of the MC multiplayer token into the signaling
 	// websocket's Authorization header at dial time (see signaling/dial.go - the token is never
@@ -381,6 +410,9 @@ func runSession(ctx context.Context, authSession *session.Session, rta *xbl.RTA,
 	// setup into this function but dropped this registration, which was the actual regression.
 	rta.OnSessionChanged = func() {
 		if err := xblSession.RefreshNonces(sessionCtx); err != nil {
+			if sessionCtx.Err() != nil {
+				return // the session ended (left on /broadcast off, or rebuilt): nothing to refresh
+			}
 			log.Error("failed to refresh session nonces", "err", err)
 		}
 	}
@@ -548,6 +580,16 @@ func runSession(ctx context.Context, authSession *session.Session, rta *xbl.RTA,
 	if errors.Is(context.Cause(sessionCtx), errTokenRenewal) {
 		return sessionID, netherNetID, errTokenRenewal
 	}
+	if errors.Is(context.Cause(sessionCtx), errListingOff) {
+		leaveCtx, cancelLeave := context.WithTimeout(ctx, 15*time.Second)
+		if err := xblSession.Leave(leaveCtx); err != nil {
+			log.Warn("could not leave the xbox live session - the world stays in the Friends tab until it times out", "err", err)
+		} else {
+			log.Info("left the xbox live session: the world is off the Friends tab")
+		}
+		cancelLeave()
+		return sessionID, netherNetID, errListingOff
+	}
 	if errors.Is(err, context.Canceled) {
 		return sessionID, netherNetID, nil
 	}
@@ -574,6 +616,7 @@ func relayConfig(cfg FileConfig, authSession *session.Session, allowXUID func(st
 			invitequeue.RecordAcceptIfInvited(xuid, name, log)
 		},
 		VerifyPlayerToken: bridge.SessionTokenVerifier(authSession),
+		Network:           network,
 		Log:               log,
 	}
 }

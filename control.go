@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gameparrot/netherconnect/bridge"
+	"github.com/ezchr/nether2rak/bridge"
 )
 
 // The control port: one loopback-only HTTP server per relay process for everything that used to
@@ -100,6 +100,12 @@ func (c *controlServer) setInvites(sessionCtx context.Context, name string, h ht
 
 func (c *controlServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
+	if serveNetworkControl(w, r) {
+		return
+	}
+	if serveChat(w, r) {
+		return
+	}
 	switch {
 	case path == "/ping":
 		bridge.PingHandler().ServeHTTP(w, r)

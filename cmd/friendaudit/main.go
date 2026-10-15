@@ -15,8 +15,8 @@ import (
 	"os"
 	"time"
 
-	"github.com/gameparrot/netherconnect/session"
-	xblpkg "github.com/gameparrot/netherconnect/xbl"
+	"github.com/ezchr/nether2rak/session"
+	xblpkg "github.com/ezchr/nether2rak/xbl"
 	"github.com/sandertv/gophertunnel/minecraft/auth"
 	"golang.org/x/oauth2"
 )

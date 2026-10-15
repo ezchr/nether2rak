@@ -7,7 +7,7 @@ import (
 	"io"
 	"net/http"
 
-	"github.com/gameparrot/netherconnect/session"
+	"github.com/ezchr/nether2rak/session"
 )
 
 // This file is the gamertag<->XUID lookup, the missing piece for callers (like cmd/scraper's

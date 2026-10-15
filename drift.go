@@ -7,7 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/gameparrot/netherconnect/bridge"
+	"github.com/ezchr/nether2rak/bridge"
 )
 
 // PlayerDriftConfig makes the advertised Friends-tab player count wander inside a range instead

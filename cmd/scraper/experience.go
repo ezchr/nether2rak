@@ -10,7 +10,7 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/gameparrot/netherconnect/session"
+	"github.com/ezchr/nether2rak/session"
 	"github.com/sandertv/gophertunnel/minecraft/protocol"
 )
 

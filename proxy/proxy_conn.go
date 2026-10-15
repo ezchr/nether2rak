@@ -502,3 +502,17 @@ type packetReader interface {
 	net.Conn
 	ReadPacket() ([]byte, error)
 }
+
+// Conn returns the connection underneath, for read deadlines.
+func (c *ProxyConn) Conn() net.Conn { return c.conn }
+
+// Pool returns the packet pool used to decode packets, for naming them.
+func (c *ProxyConn) Pool() packet.Pool { return c.pool }
+
+// Requeue puts packets back to be returned by the next ReadPackets, ahead of anything else.
+func (c *ProxyConn) Requeue(pks [][]byte) {
+	if len(pks) == 0 {
+		return
+	}
+	c.deferredPackets = append(append([][]byte{}, pks...), c.deferredPackets...)
+}

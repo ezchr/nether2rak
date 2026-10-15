@@ -26,7 +26,7 @@ import (
 	"time"
 
 	"github.com/df-mc/go-nethernet"
-	"github.com/gameparrot/netherconnect/bridge"
+	"github.com/ezchr/nether2rak/bridge"
 	"github.com/google/uuid"
 	"github.com/pion/webrtc/v4"
 	"github.com/sandertv/gophertunnel/minecraft"

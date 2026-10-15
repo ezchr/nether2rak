@@ -7,7 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/gameparrot/netherconnect/signaling/internal"
+	"github.com/ezchr/nether2rak/signaling/internal"
 
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"

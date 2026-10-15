@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gameparrot/netherconnect/session"
+	"github.com/ezchr/nether2rak/session"
 )
 
 type friendPerson struct {

@@ -11,7 +11,7 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
-	"github.com/gameparrot/netherconnect/session"
+	"github.com/ezchr/nether2rak/session"
 )
 
 const rtaWebsocketURL = "wss://rta.xboxlive.com/connect"

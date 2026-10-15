@@ -37,9 +37,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/gameparrot/netherconnect/session"
-	"github.com/gameparrot/netherconnect/xbl"
-	"github.com/gameparrot/netherconnect/xbl/friendactivity"
+	"github.com/ezchr/nether2rak/session"
+	"github.com/ezchr/nether2rak/xbl"
+	"github.com/ezchr/nether2rak/xbl/friendactivity"
 )
 
 // resolveBroadcasts fills in defaults for cfg.ExtraBroadcasts and drops invalid entries,
@@ -219,11 +219,21 @@ func runBroadcast(ctx context.Context, name string, authSession *session.Session
 	var netherNetID uint64
 	for {
 		var err error
+		if listing != nil && !listing.On() {
+			log.Info("friends-tab listing is off: waiting for /broadcast on")
+			if listing.waitOn(ctx) != nil {
+				return nil
+			}
+		}
 		sessionID, netherNetID, err = runSession(ctx, authSession, rta, xuid, sessionID, netherNetID, cfg, allowXUID, friendActivity, debug, log)
 		if ctx.Err() != nil {
 			return nil
 		}
 		switch {
+		case errors.Is(err, errListingOff):
+			backoff = time.Second
+			consecutiveFailures = 0
+			continue
 		case errors.Is(err, errTokenRenewal):
 			log.Info("restarting session for scheduled token renewal")
 			// MCToken() is a lazy cache: it only re-fetches once the cached token's own

@@ -7,7 +7,7 @@ import (
 	"io"
 	"net/http"
 
-	"github.com/gameparrot/netherconnect/session"
+	"github.com/ezchr/nether2rak/session"
 )
 
 // This file is the "invite my actual Xbox friends" source, a completely separate feature from

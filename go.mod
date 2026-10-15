@@ -1,4 +1,4 @@
-module github.com/gameparrot/netherconnect
+module github.com/ezchr/nether2rak
 
 go 1.25.0
 
@@ -6,13 +6,14 @@ require (
 	github.com/coder/websocket v1.8.14
 	github.com/coreos/go-oidc/v3 v3.17.0
 	github.com/creachadair/jrpc2 v1.3.0
-	github.com/df-mc/go-nethernet v1.0.24-0.20260921173546-5856e7973232
+	github.com/df-mc/go-nethernet v1.0.24
 	github.com/df-mc/go-playfab v1.0.0
 	github.com/df-mc/go-xsapi v1.0.1
+	github.com/go-gl/mathgl v1.1.0
 	github.com/go-jose/go-jose/v4 v4.1.4
 	github.com/google/uuid v1.6.0
 	github.com/pion/webrtc/v4 v4.2.21-0.20260920133716-91bfc6c2039f
-	github.com/sandertv/go-raknet v1.15.2-0.20260819131831-ea813dc668b5
+	github.com/sandertv/go-raknet v1.15.2
 	github.com/sandertv/gophertunnel v1.62.0
 	golang.org/x/oauth2 v0.36.0
 	golang.org/x/text v0.34.0
@@ -23,7 +24,6 @@ require (
 	github.com/df-mc/go-playfab/v2 v2.0.2 // indirect
 	github.com/df-mc/go-xsapi/v2 v2.0.3 // indirect
 	github.com/df-mc/jsonc v1.0.5 // indirect
-	github.com/go-gl/mathgl v1.1.0 // indirect
 	github.com/klauspost/compress v1.20.0 // indirect
 	github.com/pion/datachannel v1.6.3 // indirect
 	github.com/pion/dtls/v3 v3.1.9 // indirect

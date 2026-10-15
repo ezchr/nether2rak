@@ -56,6 +56,11 @@ type DirectIPConfig struct {
 	// Friends-tab listener is served with, so both doors relay identically.
 	Relay Config
 
+	// Extra, when set, answers every request outside /v1/join on the same address: the relay's
+	// control routes (config control_on_direct_ip), so the relay needs one port instead of two.
+	// Keep ListenAddress private then (loopback behind nginx, which forwards only /v1/join).
+	Extra http.Handler
+
 	Log *slog.Logger
 }
 
@@ -104,7 +109,7 @@ func StartDirectIP(ctx context.Context, cfg DirectIPConfig) error {
 
 	server := &http.Server{
 		Addr:              cfg.ListenAddress,
-		Handler:           signaling,
+		Handler:           withExtra(signaling, cfg.Extra),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
@@ -301,4 +306,18 @@ func fetchServerListEntry(ctx context.Context, address string) (*serverListEntry
 		return nil, fmt.Errorf("decode backend server-list json: %w", err)
 	}
 	return entry, nil
+}
+
+// withExtra sends /v1/join to the signaling server and everything else to extra (when set).
+func withExtra(signaling, extra http.Handler) http.Handler {
+	if extra == nil {
+		return signaling
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/join" || strings.HasPrefix(r.URL.Path, "/v1/join/") {
+			signaling.ServeHTTP(w, r)
+			return
+		}
+		extra.ServeHTTP(w, r)
+	})
 }

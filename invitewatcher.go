@@ -13,9 +13,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gameparrot/netherconnect/bridge"
-	"github.com/gameparrot/netherconnect/invitequeue"
-	"github.com/gameparrot/netherconnect/xbl"
+	"github.com/ezchr/nether2rak/bridge"
+	"github.com/ezchr/nether2rak/invitequeue"
+	"github.com/ezchr/nether2rak/xbl"
 )
 
 // This file is the host-account half of the "invite everyone from another server into ours"

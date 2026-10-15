@@ -9,10 +9,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gameparrot/netherconnect/messaging"
-	"github.com/gameparrot/netherconnect/session"
-	"github.com/gameparrot/netherconnect/signaling"
-	"github.com/gameparrot/netherconnect/xbl"
+	"github.com/ezchr/nether2rak/messaging"
+	"github.com/ezchr/nether2rak/session"
+	"github.com/ezchr/nether2rak/signaling"
+	"github.com/ezchr/nether2rak/xbl"
 
 	"github.com/df-mc/go-nethernet"
 	"github.com/google/uuid"
@@ -55,6 +55,17 @@ func scrapeFriendOnce(ctx context.Context, tokSrc oauth2.TokenSource, authSessio
 	if err != nil {
 		return fmt.Errorf("look up active session for xuid %s: %w", friendXUID, err)
 	}
+	// The host's own activity can come back without its world details (no owner, nothing to
+	// connect to) when the host isn't our friend - and joining through it is refused (403). Seen
+	// 2026-09-30 with Bippi14579's world. That counts as no activity, so the world is looked for
+	// through the friend of ours playing in it below.
+	usable := activities[:0]
+	for _, a := range activities {
+		if a.Custom.OwnerId != "" {
+			usable = append(usable, a)
+		}
+	}
+	activities = usable
 	if len(activities) == 0 {
 		// The host need not be our friend: a world also shows on our Friends tab when a friend
 		// of ours is playing in it, and that is the only way to find it then - the host's own
@@ -80,6 +91,9 @@ func scrapeFriendOnce(ctx context.Context, tokSrc oauth2.TokenSource, authSessio
 	return scrapeWorld(ctx, tokSrc, authSession, selfXUID, activities[0], 0, seen, out, log)
 }
 
+// advertiseWorld is the -advertise flag: see SetActivity in xbl/join.go.
+var advertiseWorld bool
+
 // scrapeWorld joins the world behind activity and records its players. With stay > 0 it leaves
 // after that long (returning nil); with 0 it stays until the connection drops or ctx ends.
 func scrapeWorld(ctx context.Context, tokSrc oauth2.TokenSource, authSession *session.Session, selfXUID string, activity xbl.ActiveSession, stay time.Duration, seen map[string]bool, out *queueWriter, log *slog.Logger) error {
@@ -103,6 +117,13 @@ func scrapeWorld(ctx context.Context, tokSrc oauth2.TokenSource, authSession *se
 	joined, err := xbl.JoinSession(ctx, authSession, selfXUID, connectionID, activity.HandleID)
 	if err != nil {
 		return fmt.Errorf("join xuid %s's session: %w", host, err)
+	}
+	if advertiseWorld {
+		if err := joined.SetActivity(ctx); err != nil {
+			log.Warn("could not advertise the world as this account's activity", "err", err)
+		} else {
+			log.Info("advertising the world as this account's activity (-advertise)")
+		}
 	}
 	defer func() {
 		leaveCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)

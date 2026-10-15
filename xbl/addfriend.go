@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/gameparrot/netherconnect/session"
+	"github.com/ezchr/nether2rak/session"
 )
 
 // AddFriendResult is the outcome of one SendFriendRequest call.

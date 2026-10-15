@@ -28,7 +28,7 @@ import (
 	"time"
 
 	"github.com/df-mc/go-nethernet"
-	"github.com/gameparrot/netherconnect/proxy"
+	"github.com/ezchr/nether2rak/proxy"
 	"github.com/sandertv/go-raknet"
 	"github.com/sandertv/gophertunnel/minecraft/protocol/packet"
 )
@@ -109,6 +109,10 @@ type Config struct {
 	// tell a friend who genuinely never plays from one who simply has not connected recently.
 	OnJoin func(xuid, displayName string)
 
+	// Network, when set, makes the relay a network proxy: players can be moved between its servers
+	// without leaving (see network.go). BackendTransport and the backend addresses are then unused.
+	Network *Network
+
 	Log *slog.Logger
 }
 
@@ -125,6 +129,10 @@ type backendConn interface {
 // directions until either side disconnects. Call this in its own goroutine per accepted
 // connection - see Listener.Accept in listener.go.
 func HandleConn(ctx context.Context, conn *nethernet.Conn, cfg Config) {
+	if cfg.Network != nil {
+		HandleNetworkConn(ctx, conn, cfg)
+		return
+	}
 	log := cfg.Log
 	if log == nil {
 		log = slog.Default()
@@ -156,6 +164,8 @@ func HandleConn(ctx context.Context, conn *nethernet.Conn, cfg Config) {
 		return
 	}
 	log.Info("player authenticated via xbox live", "displayName", identity.DisplayName, "xuid", identity.XUID)
+	// The backend only gets the relay's re-signed login, which GeyserMC's skin API refuses.
+	uploadSkin(clientConn.RawLoginPacket(), log)
 
 	// Make this connection's real NetherNet round-trip time queryable by XUID over the
 	// loopback ping API for the whole lifetime of the relay, not just from here to the backend.

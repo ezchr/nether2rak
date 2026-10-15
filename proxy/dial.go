@@ -17,7 +17,7 @@ import (
 	_ "unsafe"
 
 	"github.com/coreos/go-oidc/v3/oidc"
-	"github.com/gameparrot/netherconnect/session"
+	"github.com/ezchr/nether2rak/session"
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"

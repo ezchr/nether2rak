@@ -48,8 +48,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/gameparrot/netherconnect/session"
-	"github.com/gameparrot/netherconnect/xbl"
+	"github.com/ezchr/nether2rak/session"
+	"github.com/ezchr/nether2rak/xbl"
 	"github.com/google/uuid"
 	"github.com/sandertv/gophertunnel/minecraft"
 	"github.com/sandertv/gophertunnel/minecraft/auth"
@@ -83,6 +83,7 @@ func main() {
 	friendTarget := flag.String("friend", "", "Gamertag or XUID of a friend to scrape from their currently open Friends-tab world, instead of a direct-IP target")
 	reconnectDelay := flag.Duration("reconnect-delay", defaultReconnectDelay, "How long to wait between reconnect attempts after a dropped or failed connection")
 	experienceID := flag.String("experience", "", "Featured-server experience id (from a minecraft://joinExperience?experienceId=... link) to scrape: the account asks to be placed in it before every connection, as the game does")
+	flag.BoolVar(&advertiseWorld, "advertise", false, "After joining a friend's world, make it this account's activity as a real client does, so the account's own friends see the world through it and can join (off by default: scraping stays invisible)")
 	noFriendAccept := flag.Bool("no-friend-accept", false, "Do not auto-accept incoming friend requests on this account (for an account whose friends list its owner manages)")
 	flag.Parse()
 
@@ -307,6 +308,9 @@ func recordPlayerList(ctx context.Context, conn *minecraft.Conn, source string, 
 	// indefinitely and the callers' cleanup (e.g. leaving a friend's Xbox Live session) never ran.
 	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
 	defer stop()
+	// Everyone currently in the target's player list (by UUID), so the log shows how many
+	// players are really online, not just how many were new to us.
+	online := map[string]bool{}
 	for {
 		pk, err := conn.ReadPacket()
 		if err != nil {
@@ -315,6 +319,17 @@ func recordPlayerList(ctx context.Context, conn *minecraft.Conn, source string, 
 		list, ok := pk.(*packet.PlayerList)
 		if !ok {
 			continue
+		}
+		before := len(online)
+		for _, entry := range list.Entries {
+			if entry.ActionType == protocol.PlayerListActionAdd {
+				online[entry.UUID.String()] = true
+			} else {
+				delete(online, entry.UUID.String())
+			}
+		}
+		if len(online) != before {
+			log.Info("player list", "online", len(online))
 		}
 		for _, entry := range list.Entries {
 			// ActionType moved from the packet onto each entry in gophertunnel

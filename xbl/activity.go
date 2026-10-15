@@ -8,7 +8,7 @@ import (
 	"io"
 	"net/http"
 
-	"github.com/gameparrot/netherconnect/session"
+	"github.com/ezchr/nether2rak/session"
 )
 
 // This file is the "join a friend's active world" lookup, the missing piece between

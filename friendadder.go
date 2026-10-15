@@ -11,8 +11,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gameparrot/netherconnect/session"
-	"github.com/gameparrot/netherconnect/xbl"
+	"github.com/ezchr/nether2rak/session"
+	"github.com/ezchr/nether2rak/xbl"
 )
 
 // This file sends friend requests, from the account hosting this relay's world, to players

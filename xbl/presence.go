@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gameparrot/netherconnect/session"
+	"github.com/ezchr/nether2rak/session"
 )
 
 const userPresenceURLFmt = "https://userpresence.xboxlive.com/users/xuid(%s)/devices/current/titles/current"

@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gameparrot/netherconnect/session"
+	"github.com/ezchr/nether2rak/session"
 	"github.com/google/uuid"
 )
 
@@ -189,6 +189,41 @@ func (j *JoinedSession) Leave(ctx context.Context) error {
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
 		respBody, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("leave session: status %d: %s", resp.StatusCode, string(respBody))
+	}
+	return nil
+}
+
+// SetActivity makes the session this account's current activity, as a real client does when it
+// joins a world: the account's friends then see the world on their Friends tab, as "a friend is
+// playing in it", and can join it through this account.
+func (j *JoinedSession) SetActivity(ctx context.Context) error {
+	// j.url is .../serviceconfigs/{scid}/sessionTemplates/{template}/sessions/{name}
+	parts := strings.Split(strings.TrimSuffix(j.url, "/"), "/")
+	if len(parts) < 6 {
+		return fmt.Errorf("set activity: unexpected session url %q", j.url)
+	}
+	n := len(parts)
+	ref := SessionRef{Scid: parts[n-5], TemplateName: parts[n-3], Name: parts[n-1]}
+	auth, err := activityAuthHeader(ctx, j.auth)
+	if err != nil {
+		return err
+	}
+	body, _ := json.Marshal(CreateHandleRequest{Version: 1, Type: "activity", SessionRef: ref})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://sessiondirectory.xboxlive.com/handles", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", auth)
+	req.Header.Set("x-xbl-contract-version", xblContractVersion)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("set activity: %w", err)
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		return fmt.Errorf("set activity: status %d: %s", resp.StatusCode, string(respBody))
 	}
 	return nil
 }

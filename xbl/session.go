@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"strings"
 
 	"encoding/json"
 	"fmt"
@@ -14,7 +15,7 @@ import (
 	"net/http"
 	"sync"
 
-	"github.com/gameparrot/netherconnect/session"
+	"github.com/ezchr/nether2rak/session"
 	"github.com/google/uuid"
 )
 
@@ -74,7 +75,7 @@ type Session struct {
 	// version of this file did) churns the subscription and can break join notifications.
 	subscriptionID string
 
-	nonces      map[string]string
+	nonces map[string]string
 	// nonceConnections tracks, per XUID, which member-slot "connection" value the current
 	// nonce was issued for. Xbox Live assigns a new connection value each time a XUID
 	// (re)joins the session's member list; without tracking it, RefreshNonces could only tell
@@ -120,14 +121,14 @@ func New(authSession *session.Session, xuid, sessionID, connectionID, pmsgID str
 	// the constant "level" here.
 	levelSum := sha256.Sum256([]byte(sessionID))
 	return &Session{
-		auth:           authSession,
-		xuid:           xuid,
-		log:            log,
-		connectionID:   connectionID,
-		sessionID:      sessionID,
-		netherNetID:    netherNetID,
-		pmsgID:         pmsgID,
-		levelID:        base64.StdEncoding.EncodeToString(levelSum[:8]),
+		auth:             authSession,
+		xuid:             xuid,
+		log:              log,
+		connectionID:     connectionID,
+		sessionID:        sessionID,
+		netherNetID:      netherNetID,
+		pmsgID:           pmsgID,
+		levelID:          base64.StdEncoding.EncodeToString(levelSum[:8]),
 		subscriptionID:   uuid.NewString(),
 		nonces:           make(map[string]string),
 		nonceConnections: make(map[string]string),
@@ -294,6 +295,34 @@ func (s *Session) put(ctx context.Context, body any) (*CreateSessionResponse, er
 		return nil, fmt.Errorf("parse session response: %w", err)
 	}
 	return &parsed, nil
+}
+
+// Leave takes the host out of the session, which takes the world off the Friends tab now instead
+// of when the session times out. Players connected through it stay connected.
+func (s *Session) Leave(ctx context.Context) error {
+	auth, err := s.authHeader(ctx)
+	if err != nil {
+		return err
+	}
+	url := fmt.Sprintf(sessionURLFmt, ServiceConfigID, TemplateName, s.sessionID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, strings.NewReader(`{"members":{"me":null}}`))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", auth)
+	req.Header.Set("x-xbl-contract-version", xblContractVersion)
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("leave session: %w", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	switch resp.StatusCode {
+	case 200, 201, 204:
+		return nil
+	}
+	return fmt.Errorf("leave session: status %d: %s", resp.StatusCode, string(body))
 }
 
 // Create creates the MPSD session document and binds an activity handle to it so it actually

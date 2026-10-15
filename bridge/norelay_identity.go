@@ -29,7 +29,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/gameparrot/netherconnect/session"
+	"github.com/ezchr/nether2rak/session"
 	"github.com/go-jose/go-jose/v4"
 )
 

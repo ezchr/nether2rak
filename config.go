@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/ezchr/nether2rak/bridge"
 	"os"
 	"strings"
 )
@@ -176,6 +177,21 @@ type FileConfig struct {
 	// primary broadcast (token.json, host_name, world_name above) is unchanged and always runs.
 	// See broadcasts.go.
 	ExtraBroadcasts []BroadcastConfig `json:"extra_broadcasts"`
+
+	// Servers makes the relay a network: players can be moved between these servers (/server)
+	// without leaving the world. Relay mode only. DefaultServer is where they join (default: the
+	// first). NetworkDir caches each server's content and packs (default "network").
+	Servers       []bridge.ServerConfig `json:"servers,omitempty"`
+	DefaultServer string                `json:"default_server,omitempty"`
+	NetworkDir    string                `json:"network_dir,omitempty"`
+	// Admins (gamertags or XUIDs) may use the in-game /broadcast.
+	Admins []string `json:"admins,omitempty"`
+	// ListingToggle lets /broadcast and the control port take the world off the Friends tab and
+	// put it back (state in listing_state.json, off until first switched on).
+	ListingToggle bool `json:"listing_toggle,omitempty"`
+	// ControlOnDirectIP serves the control routes on the direct-IP door's address instead of
+	// opening control_port (needs relay_direct_ip; that address must stay private).
+	ControlOnDirectIP bool `json:"control_on_direct_ip,omitempty"`
 
 	// BroadcastName and InvitesEnabled describe the one broadcast a copy of the config is being
 	// run for (see runBroadcast and BroadcastConfig.forBroadcast). Never read from the file.

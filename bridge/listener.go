@@ -10,9 +10,9 @@ import (
 	"time"
 
 	"github.com/df-mc/go-nethernet"
-	"github.com/gameparrot/netherconnect/messaging"
-	"github.com/gameparrot/netherconnect/session"
-	"github.com/gameparrot/netherconnect/signaling"
+	"github.com/ezchr/nether2rak/messaging"
+	"github.com/ezchr/nether2rak/session"
+	"github.com/ezchr/nether2rak/signaling"
 	"github.com/pion/webrtc/v4"
 )
 

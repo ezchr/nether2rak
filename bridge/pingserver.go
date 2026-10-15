@@ -124,7 +124,7 @@ func PingHandler() http.Handler {
 		// not assumed) - double each back to a full round trip before summing, rather than
 		// summing the halves and doubling once, since that would be wrong the moment only one
 		// leg is present (see below).
-		clientMs := l.client.Latency().Milliseconds() * 2
+		clientMs := clientRoundTrip(l.client).Milliseconds() // the network ping: icertt.go
 		totalMs := clientMs
 		var backendMs int64
 		if l.backend != nil {

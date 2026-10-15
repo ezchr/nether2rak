@@ -21,8 +21,8 @@ import (
 	"sort"
 	"time"
 
-	"github.com/gameparrot/netherconnect/session"
-	"github.com/gameparrot/netherconnect/xbl/friendactivity"
+	"github.com/ezchr/nether2rak/session"
+	"github.com/ezchr/nether2rak/xbl/friendactivity"
 	"github.com/sandertv/gophertunnel/minecraft/auth"
 	"golang.org/x/oauth2"
 )
