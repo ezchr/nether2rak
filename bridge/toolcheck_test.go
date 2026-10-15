@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"encoding/json"
+	"github.com/sandertv/gophertunnel/minecraft/protocol/login"
 	"net"
 	"os"
 	"reflect"
@@ -33,7 +34,7 @@ func TestRadiusSignals(t *testing.T) {
 
 func TestParseToolRules(t *testing.T) {
 	def := parseToolRules("")
-	want := map[string]int{ruleContradiction: toolKick, ruleMaxZero: toolKick, ruleRadius: toolFlag}
+	want := map[string]int{ruleContradiction: toolKick, ruleMaxZero: toolKick, ruleRadius: toolFlag, ruleClient: toolFlag}
 	if !reflect.DeepEqual(def, want) {
 		t.Errorf("defaults = %v, want %v", def, want)
 	}
@@ -44,8 +45,8 @@ func TestParseToolRules(t *testing.T) {
 	}
 	// title, notitle and notitle_maxzero were rules once; an old N2R_TOOLCHECK naming them must
 	// not break anything.
-	mixed := parseToolRules("maxzero=flag, title=off, radius=kick, notitle=kick, notitle_maxzero=kick, nonsense=kick, contradiction=what, MaxZero = FLAG")
-	want = map[string]int{ruleContradiction: toolKick, ruleMaxZero: toolFlag, ruleRadius: toolFlag}
+	mixed := parseToolRules("maxzero=flag, title=off, radius=kick, client=kick, notitle=kick, notitle_maxzero=kick, nonsense=kick, contradiction=what, MaxZero = FLAG")
+	want = map[string]int{ruleContradiction: toolKick, ruleMaxZero: toolFlag, ruleRadius: toolFlag, ruleClient: toolFlag}
 	if !reflect.DeepEqual(mixed, want) {
 		t.Errorf("mixed = %v, want %v", mixed, want)
 	}
@@ -158,7 +159,7 @@ func TestToolExempt(t *testing.T) {
 	// NetherNet addresses are text; the resolved peer address comes last.
 	for text, want := range map[string]bool{
 		"123 (456) (udp4 prflx 203.0.113.7:63264 related :0 (resolved: 203.0.113.7:63264))": false,
-		"123 (456) (udp4 host 10.0.0.5:1 (resolved: 127.0.0.1:57207))":                            true,
+		"123 (456) (udp4 host 10.0.0.5:1 (resolved: 127.0.0.1:57207))":                      true,
 		"no address here": false,
 	} {
 		if got := toolExempt(textAddr(text)); got != want {
@@ -171,3 +172,22 @@ type textAddr string
 
 func (textAddr) Network() string  { return "nethernet" }
 func (a textAddr) String() string { return string(a) }
+
+func TestClientSignals(t *testing.T) {
+	real := login.ClientData{DeviceModel: "iPhone14,2", SkinData: "c2tpbg=="}
+	if got, _ := clientSignals(real); got != nil {
+		t.Errorf("real client: %v", got)
+	}
+	for _, cd := range []login.ClientData{
+		{SkinData: "c2tpbg=="},
+		{DeviceModel: "  ", SkinData: "c2tpbg=="},
+		{DeviceModel: "SM-G991B", SkinData: defaultSkinData},
+	} {
+		if got, seen := clientSignals(cd); !reflect.DeepEqual(got, []string{ruleClient}) || seen == "" {
+			t.Errorf("%q: %v (%q)", cd.DeviceModel, got, seen)
+		}
+	}
+	if _, seen := clientSignals(login.ClientData{SkinData: defaultSkinData}); seen != "no device model, default skin" {
+		t.Errorf("both: %q", seen)
+	}
+}

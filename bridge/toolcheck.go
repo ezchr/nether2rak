@@ -1,6 +1,8 @@
 package bridge
 
 import (
+	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"net"
 	"os"
@@ -8,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/sandertv/gophertunnel/minecraft/protocol/login"
 )
 
 // Checks for bedrocktool, a proxy that saves every chunk a server sends into a world file. They
@@ -17,12 +21,11 @@ import (
 //   - radius: a very large view distance (the tool forces 76).
 //   - contradiction: a view distance above the maximum the same packet states.
 //   - maxzero: no maximum at all. The tool's own request leaves it out; every real client sends one.
-//
-// There is no check on the Xbox title the player signed in with. Current clients log in with a
-// multiplayer token, which names no Xbox title (gophertunnel fills IdentityData.TitleID only from
-// the old certificate chain), so every real player looked like an unofficial client and a title
-// could never disagree with the device. The login is still logged, for measuring what the token
-// does name.
+//   - client: the login's client data is gophertunnel's fill-in rather than the game's: no device
+//     model, or gophertunnel's all-black default skin. Tools built on gophertunnel send these unless
+//     they copy a real client's data. It replaces the old check on the Xbox title, which current
+//     logins no longer carry: the multiplayer token names only the PlayFab title, the same for
+//     every copy of the game, and the old certificate chain with the Xbox title is not sent.
 //
 // Every rule a player trips is logged and flags the player for good, in toolcheck_flags.json in
 // the working directory (by XUID: name, which rules, how often, first and last time). A rule set
@@ -42,6 +45,7 @@ const (
 	ruleRadius        = "radius"
 	ruleContradiction = "contradiction"
 	ruleMaxZero       = "maxzero"
+	ruleClient        = "client"
 )
 
 const (
@@ -60,7 +64,7 @@ const (
 var toolRules = parseToolRules(os.Getenv("N2R_TOOLCHECK"))
 
 func parseToolRules(v string) map[string]int {
-	rules := map[string]int{ruleRadius: toolFlag, ruleContradiction: toolKick, ruleMaxZero: toolKick}
+	rules := map[string]int{ruleRadius: toolFlag, ruleContradiction: toolKick, ruleMaxZero: toolKick, ruleClient: toolFlag}
 	mode := func(s string) (int, bool) {
 		switch strings.ToLower(strings.TrimSpace(s)) {
 		case "off":
@@ -90,9 +94,12 @@ func parseToolRules(v string) map[string]int {
 			rules[name] = m
 		}
 	}
-	// A large view distance alone is never a reason to kick.
-	if rules[ruleRadius] == toolKick {
-		rules[ruleRadius] = toolFlag
+	// A large view distance alone is never a reason to kick, and the client rule only flags until
+	// real clients were measured against it.
+	for _, rule := range []string{ruleRadius, ruleClient} {
+		if rules[rule] == toolKick {
+			rules[rule] = toolFlag
+		}
 	}
 	return rules
 }
@@ -124,6 +131,25 @@ func radiusSignals(radius int32, max uint8) []string {
 		out = append(out, ruleRadius)
 	}
 	return out
+}
+
+// defaultSkinData is the skin gophertunnel's dialer fills in when a client sets none: 64x32 pixels,
+// all black.
+var defaultSkinData = base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0, 0, 0, 255}, 32*64))
+
+// clientSignals are the rules a login's client data trips, with what was seen.
+func clientSignals(cd login.ClientData) (signals []string, seen string) {
+	var why []string
+	if strings.TrimSpace(cd.DeviceModel) == "" {
+		why = append(why, "no device model")
+	}
+	if cd.SkinData == defaultSkinData {
+		why = append(why, "default skin")
+	}
+	if len(why) == 0 {
+		return nil, ""
+	}
+	return []string{ruleClient}, strings.Join(why, ", ")
 }
 
 // toolAllowed reports whether the XUID is listed in toolAllowFile.

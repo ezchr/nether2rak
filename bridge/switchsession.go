@@ -170,12 +170,33 @@ func handleNetwork(ctx context.Context, conn backendConn, isNetherNet bool, cfg 
 			return
 		}
 	}
-	// bedrocktool checks run on the view-distance request, see toolcheck.go. Our own services and
-	// the players of toolcheck_allow.txt are left alone. The login itself is only logged: what it
-	// names is being measured for a check that works with token logins.
+	// bedrocktool and unofficial-client checks, see toolcheck.go. Our own services and the players
+	// of toolcheck_allow.txt are left alone, but their login is still logged: our bots are built on
+	// gophertunnel, so their client data is the reference for what the client rule should catch.
 	exempt := toolExempt(conn.RemoteAddr()) || toolAllowed(id.XUID)
-	if !exempt {
-		log.Info("toolcheck: login", "xuid", id.XUID, "titleID", id.TitleID, "playfabTitleID", id.PlayFabTitleID, "deviceOS", int(client.ClientData().DeviceOS), "remote", conn.RemoteAddr())
+	{
+		cd := client.ClientData()
+		signals, seen := clientSignals(cd)
+		var kick bool
+		if exempt {
+			signals = nil
+		} else {
+			signals, kick = toolVerdict(signals)
+		}
+		log.Info("toolcheck: login", "xuid", id.XUID, "exempt", exempt, "signals", signals, "seen", seen,
+			"deviceOS", int(cd.DeviceOS), "deviceModel", cd.DeviceModel, "gameVersion", cd.GameVersion,
+			"language", cd.LanguageCode, "skin", fmt.Sprintf("%dx%d", cd.SkinImageWidth, cd.SkinImageHeight),
+			"playfabID", cd.PlayFabID, "tokenPlayfabID", id.PlayFabID, "playfabTitleID", id.PlayFabTitleID,
+			"titleID", id.TitleID, "remote", conn.RemoteAddr())
+		if err := flagPlayer(id.XUID, id.DisplayName, signals, "login: "+seen); err != nil {
+			log.Warn("toolcheck: flag not saved", "err", err)
+		}
+		if kick {
+			log.Warn("toolcheck: kicked", "rules", signals, "xuid", id.XUID)
+			_ = client.WritePacket(&packet.Disconnect{Message: toolKickMessage})
+			time.Sleep(time.Second)
+			return
+		}
 	}
 	// The servers only get the relay's re-signed login, which GeyserMC's skin API refuses.
 	uploadSkin(client.RawLoginPacket(), log)
