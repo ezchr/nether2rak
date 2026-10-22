@@ -64,8 +64,9 @@ func setupNetwork(cfg FileConfig, authSession *session.Session, log *slog.Logger
 		Identity: func(ctx context.Context) (*nethernet.Identity, error) {
 			return bridge.NewClientIdentity(ctx, authSession)
 		},
-		Admins: admins,
-		Log:    log,
+		Admins:        admins,
+		Log:           log,
+		RejoinAddress: cfg.RejoinAddress,
 	}
 	if listing != nil {
 		n.Listing = listing

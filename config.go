@@ -192,6 +192,9 @@ type FileConfig struct {
 	// ControlOnDirectIP serves the control routes on the direct-IP door's address instead of
 	// opening control_port (needs relay_direct_ip; that address must stay private).
 	ControlOnDirectIP bool `json:"control_on_direct_ip,omitempty"`
+	// RejoinAddress (host:port, network mode) is where players are transferred to join again when
+	// a server's content changed during their join; empty asks them to join again.
+	RejoinAddress string `json:"rejoin_address,omitempty"`
 
 	// BroadcastName and InvitesEnabled describe the one broadcast a copy of the config is being
 	// run for (see runBroadcast and BroadcastConfig.forBroadcast). Never read from the file.

@@ -46,6 +46,10 @@ type Network struct {
 	Admins  map[string]bool
 	Listing Listing
 	Log     *slog.Logger
+	// RejoinAddress (host:port) is where a player is transferred to join again when a server's
+	// content changed during their join or move, so they play with the new content; "" asks them
+	// to join again instead.
+	RejoinAddress string
 
 	mu       sync.Mutex
 	content  map[string]*serverContent
@@ -191,15 +195,15 @@ func (c *serverContent) set(id uint32, payload []byte) {
 }
 
 // record keeps what a server just sent at a join, on disk too when it changed, and starts fetching
-// resource packs the relay does not have yet.
-func (n *Network) record(server string, id uint32, payload []byte) {
+// resource packs the relay does not have yet. It reports whether the content changed.
+func (n *Network) record(server string, id uint32, payload []byte) bool {
 	file, ok := contentFiles[id]
 	if !ok {
-		return
+		return false
 	}
 	path := filepath.Join(n.Dir, server, file)
 	if old, err := os.ReadFile(path); err == nil && (bytes.Equal(old, payload) || fingerprint(id, old) == fingerprint(id, payload)) {
-		return
+		return false
 	}
 	n.mu.Lock()
 	c := n.content[server]
@@ -218,6 +222,7 @@ func (n *Network) record(server string, id uint32, payload []byte) {
 	if id == packet.IDResourcePacksInfo {
 		go n.fetchPacks(server)
 	}
+	return true
 }
 
 // union is the content a joining client gets: every server's, the default server's first.

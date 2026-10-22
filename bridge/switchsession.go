@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"math"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -37,6 +38,8 @@ type switchSession struct {
 
 	ctx    context.Context
 	cancel context.CancelCauseFunc
+	// rejoining is set once the player is being sent to join again (record).
+	rejoining atomic.Bool
 
 	wmu sync.Mutex // client writes
 
@@ -270,6 +273,42 @@ func (s *switchSession) sendClient(pks ...packet.Packet) {
 	}
 }
 
+// record keeps what a server sent at a join or move (Network.record). New resource packs mean
+// this client has the old ones (packs only download at a join): it is sent to join again, once,
+// to download them. Other changes keep it relayed (items are renumbered per server, and new
+// entities come with new packs).
+func (s *switchSession) record(server string, id uint32, payload []byte) {
+	changed := s.n.record(server, id, payload)
+	if !changed || (id != packet.IDResourcePacksInfo && id != packet.IDResourcePackStack) || !s.rejoining.CompareAndSwap(false, true) {
+		return
+	}
+	s.log.Info("network: server has new resource packs, the player joins again to download them", "server", server)
+	go s.rejoin()
+}
+
+// rejoin transfers the client to the network again (Network.RejoinAddress), or asks the player to
+// join again when there is no address or the client stays.
+func (s *switchSession) rejoin() {
+	select {
+	case <-time.After(3 * time.Second): // a transfer while the client still loads is lost
+	case <-s.ctx.Done():
+		return
+	}
+	const msg = "§eThe server just updated.\n§fJoin again to play."
+	host, port, err := net.SplitHostPort(s.n.RejoinAddress)
+	p, perr := strconv.ParseUint(port, 10, 16)
+	if err != nil || perr != nil {
+		s.disconnect(msg)
+		return
+	}
+	s.sendClient(&packet.Transfer{Address: host, Port: uint16(p)})
+	select {
+	case <-time.After(5 * time.Second):
+		s.disconnect(msg)
+	case <-s.ctx.Done():
+	}
+}
+
 func (s *switchSession) disconnect(msg string) {
 	_ = s.writeClient(encodePacket(&packet.Disconnect{Message: msg}))
 	s.cancel(errors.New("disconnected: " + msg))
@@ -472,11 +511,11 @@ func (s *switchSession) readLogin(l *link) {
 				l.close()
 				return
 			case packet.IDResourcePacksInfo:
-				s.n.record(l.server.Name, id, payload)
+				s.record(l.server.Name, id, payload)
 				_ = l.c.WritePacket(&packet.ResourcePackClientResponse{Response: packet.PackResponseAllPacksDownloaded})
 				continue
 			case packet.IDResourcePackStack:
-				s.n.record(l.server.Name, id, payload)
+				s.record(l.server.Name, id, payload)
 				_ = l.c.WritePacket(&packet.ResourcePackClientResponse{Response: packet.PackResponseCompleted})
 				continue
 			case packet.IDStartGame:
@@ -486,7 +525,7 @@ func (s *switchSession) readLogin(l *link) {
 					l.close()
 					return
 				}
-				s.n.record(l.server.Name, id, payload)
+				s.record(l.server.Name, id, payload)
 				l.startGame = sg
 				// The rest of this batch belongs to the game: queue it for readBackend.
 				l.c.Requeue(pks[i+1:])
@@ -497,7 +536,7 @@ func (s *switchSession) readLogin(l *link) {
 				if id == packet.IDItemRegistry && l.itemReg != nil {
 					continue
 				}
-				s.n.record(l.server.Name, id, payload)
+				s.record(l.server.Name, id, payload)
 				if id == packet.IDItemRegistry {
 					reg := &packet.ItemRegistry{}
 					if decodeInto(reg, payload) == nil {
@@ -541,7 +580,7 @@ func (s *switchSession) readBackend(l *link, first bool) {
 				if id == packet.IDItemRegistry && l.itemReg != nil {
 					continue
 				}
-				s.n.record(l.server.Name, id, payload)
+				s.record(l.server.Name, id, payload)
 				if id == packet.IDItemRegistry {
 					reg := &packet.ItemRegistry{}
 					if decodeInto(reg, payload) == nil {
