@@ -723,9 +723,13 @@ func fingerprint(id uint32, payload []byte) string {
 			fmt.Fprintf(&b, "%s=%v,", e.Name, e.Enabled)
 		}
 	case c.Items != nil:
+		// In any order: Dragonfly lists its items in a different order at every join.
+		items := make([]string, 0, len(c.Items.Items))
 		for _, it := range c.Items.Items {
-			fmt.Fprintf(&b, "%s=%d,", it.Name, it.RuntimeID)
+			items = append(items, fmt.Sprintf("%s=%d", it.Name, it.RuntimeID))
 		}
+		slices.Sort(items)
+		b.WriteString(strings.Join(items, ","))
 	case c.Actors != nil:
 		var m map[string]any
 		_ = nbt.NewDecoderWithEncoding(bytes.NewReader(c.Actors.SerialisedEntityIdentifiers), nbt.NetworkLittleEndian).Decode(&m)
@@ -741,13 +745,20 @@ func fingerprint(id uint32, payload []byte) string {
 	case c.Biomes != nil:
 		fmt.Fprintf(&b, "%d", len(c.Biomes.BiomeDefinitions))
 	case c.PacksInfo != nil:
+		// In any order, as the items: Dragonfly lists its packs in a different order at every start.
+		packs := make([]string, 0, len(c.PacksInfo.TexturePacks))
 		for _, t := range c.PacksInfo.TexturePacks {
-			fmt.Fprintf(&b, "%s_%s,", t.UUID, t.Version)
+			packs = append(packs, fmt.Sprintf("%s_%s", t.UUID, t.Version))
 		}
+		slices.Sort(packs)
+		b.WriteString(strings.Join(packs, ","))
 	case c.PackStack != nil:
+		packs := make([]string, 0, len(c.PackStack.TexturePacks))
 		for _, t := range c.PackStack.TexturePacks {
-			fmt.Fprintf(&b, "%s_%s,", t.UUID, t.Version)
+			packs = append(packs, fmt.Sprintf("%s_%s", t.UUID, t.Version))
 		}
+		slices.Sort(packs)
+		b.WriteString(strings.Join(packs, ","))
 	default:
 		return string(payload)
 	}
